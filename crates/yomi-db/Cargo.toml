@@ -7,6 +7,8 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+exclude = ["tests/"]
+
 [dependencies]
 yomi-core = { path = "../yomi-core" }
 thiserror.workspace = true

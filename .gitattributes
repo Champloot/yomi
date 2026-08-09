@@ -1,0 +1,18 @@
+# Файлы, не попадающие в архивы исходников, которые GitHub генерирует
+# для каждого тега (кнопка «Source code (tar.gz)» на странице релиза)
+# и в `git archive`.
+#
+# Это внутренние материалы: они нужны при разработке, но пользователю,
+# скачивающему релиз, они ни к чему и только раздувают архив.
+
+docs/internal/  export-ignore
+CLAUDE.md       export-ignore
+.github/        export-ignore
+.gitattributes  export-ignore
+.envrc          export-ignore
+
+# Нормализация переводов строк: репозиторий хранит LF независимо от
+# того, на чём работает участник.
+* text=auto eol=lf
+*.png binary
+*.cbz binary
