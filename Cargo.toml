@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/yomi-core", "crates/yomi-viewer", "crates/yomi-cli"]
+members = ["crates/yomi-core", "crates/yomi-viewer", "crates/yomi-db", "crates/yomi-cli"]
 
 [workspace.package]
 version = "0.1.0"

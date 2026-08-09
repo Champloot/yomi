@@ -102,7 +102,7 @@ pub fn run(
     direction: Direction,
     preload: u8,
     start_page: usize,
-) -> Result<()> {
+) -> Result<usize> {
     let mut current = start_page.min(source.page_count().saturating_sub(1));
 
     enable_raw_mode().map_err(|e| Error::Terminal(e.to_string()))?;
@@ -112,7 +112,9 @@ pub fn run(
     let _ = disable_raw_mode();
     print!("\r\n");
     let _ = std::io::stdout().flush();
-    result
+    // Страницу возвращаем даже при ошибке: прогресс лучше сохранить
+    // до места сбоя, чем потерять его целиком.
+    result.map(|()| current)
 }
 
 fn run_loop(

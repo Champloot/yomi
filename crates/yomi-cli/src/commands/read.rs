@@ -113,14 +113,74 @@ pub async fn run(ctx: &Ctx, args: &ReadArgs) -> Result<()> {
         fit,
         upscale,
     };
-    yomi_viewer::reader::run(
+
+    // Если глава есть в библиотеке, продолжаем с сохранённого места и
+    // записываем прогресс на выходе. Отсутствие базы или записи — не
+    // ошибка: читать файл, которого нет в библиотеке, тоже нужно.
+    let store = open_store_quietly();
+    let known_chapter = store.as_ref().and_then(|s| {
+        s.chapter_by_path(&args.path.to_string_lossy())
+            .ok()
+            .flatten()
+    });
+
+    // Явно указанная страница всегда важнее сохранённого прогресса.
+    let start = match (&store, &known_chapter) {
+        (Some(store), Some(chapter)) if args.page == 1 => match store.progress_of(chapter.id) {
+            Ok(Some(p)) if !p.completed && (p.page as usize) < source.page_count() => {
+                println!(
+                    "Продолжаю с страницы {} из {}",
+                    p.page + 1,
+                    source.page_count()
+                );
+                p.page as usize
+            }
+            _ => start,
+        },
+        _ => start,
+    };
+
+    let outcome = yomi_viewer::reader::run(
         &source,
         opts,
         direction,
         ctx.config.reader.preload_pages,
         start,
-    )
-    .map_err(|e| anyhow::anyhow!(e).context("отображение страниц"))
+    );
+
+    if let (Some(store), Some(chapter)) = (&store, &known_chapter) {
+        // При ошибке рендера сохраняем хотя бы стартовую позицию:
+        // потерять прогресс целиком хуже, чем записать его неточно.
+        let page = *outcome.as_ref().unwrap_or(&start);
+        if let Err(e) =
+            store.save_progress(chapter.id, page as u32, Some(source.page_count() as u32))
+        {
+            // Не роняем чтение из-за проблем с базой: главу уже прочитали.
+            tracing::warn!(error = %e, "не удалось сохранить прогресс");
+        }
+    }
+
+    outcome
+        .map(|_| ())
+        .map_err(|e| anyhow::anyhow!(e).context("отображение страниц"))
+}
+
+/// Открывает библиотеку, молча возвращая None при любой проблеме.
+///
+/// У команды `read` есть смысл и без библиотеки: чтение файла не должно
+/// зависеть от того, заведена ли база.
+fn open_store_quietly() -> Option<yomi_db::Store> {
+    let path = yomi_core::paths::database_file().ok()?;
+    if !path.exists() {
+        return None;
+    }
+    match yomi_db::Store::open(&path) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            tracing::debug!(error = %e, "библиотека недоступна, читаю без прогресса");
+            None
+        }
+    }
 }
 
 #[cfg(test)]

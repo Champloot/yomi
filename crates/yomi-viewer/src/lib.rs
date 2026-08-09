@@ -10,11 +10,13 @@
 pub mod archive;
 pub mod cache;
 pub mod capability;
+pub mod comicinfo;
 mod error;
 pub mod fit;
 mod natural_sort;
 pub mod reader;
 pub mod render;
+pub mod scan;
 pub mod terminal;
 
 pub use capability::Protocol;

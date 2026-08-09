@@ -15,8 +15,13 @@ path = "src/main.rs"
 [dependencies]
 yomi-core = { path = "../yomi-core" }
 yomi-viewer = { path = "../yomi-viewer" }
+yomi-db = { path = "../yomi-db" }
 anyhow.workspace = true
 clap.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+zip = { version = "0.6", default-features = false, features = ["deflate"] }
+image = { version = "0.24", default-features = false, features = ["png"] }
