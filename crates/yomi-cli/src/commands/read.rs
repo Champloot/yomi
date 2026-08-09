@@ -1,43 +1,27 @@
 //! `yomi read` — читалка. Основная работа этапа M1.
 //!
-//! Уже сейчас команда делает полезное: проверяет, что путь существует и
-//! опознаётся как поддерживаемый формат. Это позволяет тестировать
-//! определение формата отдельно от рендеринга.
+//! Здесь только связывание: путь → источник страниц (`yomi_viewer::archive`)
+//! → протокол вывода (`yomi_viewer::capability`) → интерактивный цикл
+//! (`yomi_viewer::reader`). Вся логика — в крейте `yomi-viewer`, тут её
+//! не должно прибавляться.
 
-use super::{not_implemented, Ctx};
+use super::Ctx;
 use crate::cli::ReadArgs;
 use anyhow::{bail, Result};
-use std::path::Path;
+use yomi_core::config::Renderer;
+use yomi_viewer::archive::PageSource;
+use yomi_viewer::capability::{self, Protocol};
 
-/// Что нам подсунули.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InputKind {
-    /// Каталог с изображениями.
-    Directory,
-    /// Архив CBZ/ZIP.
-    Cbz,
-    /// Архив CBR/RAR — распаковка отложена, см. ADR-0006.
-    Cbr,
-    /// Одиночное изображение.
-    Image,
-    Unsupported,
-}
-
-pub fn detect_kind(path: &Path) -> InputKind {
-    if path.is_dir() {
-        return InputKind::Directory;
-    }
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.to_lowercase())
-        .unwrap_or_default();
-
-    match ext.as_str() {
-        "cbz" | "zip" => InputKind::Cbz,
-        "cbr" | "rar" => InputKind::Cbr,
-        "png" | "jpg" | "jpeg" | "webp" | "avif" | "gif" => InputKind::Image,
-        _ => InputKind::Unsupported,
+/// Переводит выбор из конфига/флага в протокол. `Auto` — единственный
+/// вариант, требующий обращения к окружению процесса; остальные —
+/// явный выбор пользователя, и его нужно уважать безоговорочно.
+fn resolve_protocol(renderer: Renderer) -> Protocol {
+    match renderer {
+        Renderer::Auto => capability::detect_from_process_env(),
+        Renderer::Kitty => Protocol::Kitty,
+        Renderer::Iterm2 => Protocol::Iterm2,
+        Renderer::Sixel => Protocol::Sixel,
+        Renderer::Blocks => Protocol::Blocks,
     }
 }
 
@@ -46,61 +30,69 @@ pub async fn run(ctx: &Ctx, args: &ReadArgs) -> Result<()> {
         bail!("путь не существует: {}", args.path.display());
     }
 
-    let kind = detect_kind(&args.path);
+    // CBR/RAR узнаём раньше PageSource::open: у отказа есть конкретная
+    // причина (несвободная лицензия unrar, см. ADR-0006), и пользователь
+    // должен увидеть её, а не обезличенное «формат не поддерживается».
+    if let Some(ext) = args.path.extension().and_then(|e| e.to_str()) {
+        if matches!(ext.to_lowercase().as_str(), "cbr" | "rar") {
+            bail!("CBR/RAR пока не поддерживается, см. docs/adr/0006-formats.md");
+        }
+    }
+
+    // Проверка номера страницы — это валидация аргумента, она не зависит
+    // от содержимого файла и должна отработать раньше, чем мы вообще
+    // попытаемся открыть источник.
+    if args.page == 0 {
+        bail!("страницы нумеруются с единицы");
+    }
+
     let renderer = args
         .renderer
         .map(Into::into)
         .unwrap_or(ctx.config.reader.renderer);
+    let protocol = resolve_protocol(renderer);
+
+    let source = PageSource::open(&args.path)
+        .map_err(|e| anyhow::anyhow!(e).context(format!("открытие {}", args.path.display())))?;
 
     tracing::info!(
         path = %args.path.display(),
-        ?kind,
-        ?renderer,
+        pages = source.page_count(),
+        protocol = protocol.label_ru(),
         direction = ?ctx.config.reader.direction,
-        page = args.page,
         "запуск читалки"
     );
 
-    match kind {
-        InputKind::Unsupported => {
-            bail!(
-                "неподдерживаемый формат: {}. Поддерживаются каталоги, CBZ и изображения",
-                args.path.display()
-            )
-        }
-        InputKind::Cbr => bail!("CBR/RAR пока не поддерживается, см. docs/adr/0006-formats.md"),
-        _ => Err(not_implemented("чтение и вывод страниц", "M1")),
+    let start = (args.page as usize).saturating_sub(1);
+    if start >= source.page_count() {
+        bail!(
+            "страница {} вне диапазона: всего страниц {}",
+            args.page,
+            source.page_count()
+        );
     }
+
+    yomi_viewer::reader::run(&source, protocol, start)
+        .map_err(|e| anyhow::anyhow!(e).context("отображение страниц"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[test]
-    fn detects_cbz_regardless_of_case() {
-        assert_eq!(detect_kind(&PathBuf::from("a.CBZ")), InputKind::Cbz);
-        assert_eq!(detect_kind(&PathBuf::from("a.cbz")), InputKind::Cbz);
+    fn auto_renderer_resolves_from_environment() {
+        // Пустое окружение детерминированно даёт блоки — единственный
+        // протокол, гарантированно работающий без графических escape-кодов.
+        std::env::remove_var("KITTY_WINDOW_ID");
+        std::env::remove_var("TERM_PROGRAM");
+        assert_eq!(resolve_protocol(Renderer::Auto), Protocol::Blocks);
     }
 
     #[test]
-    fn detects_images() {
-        assert_eq!(detect_kind(&PathBuf::from("page.jpeg")), InputKind::Image);
-        assert_eq!(detect_kind(&PathBuf::from("page.webp")), InputKind::Image);
-    }
-
-    #[test]
-    fn detects_directory() {
-        assert_eq!(detect_kind(&PathBuf::from("/tmp")), InputKind::Directory);
-    }
-
-    #[test]
-    fn unknown_extension_is_unsupported() {
-        assert_eq!(
-            detect_kind(&PathBuf::from("notes.txt")),
-            InputKind::Unsupported
-        );
-        assert_eq!(detect_kind(&PathBuf::from("noext")), InputKind::Unsupported);
+    fn explicit_renderer_choice_is_never_overridden() {
+        assert_eq!(resolve_protocol(Renderer::Kitty), Protocol::Kitty);
+        assert_eq!(resolve_protocol(Renderer::Sixel), Protocol::Sixel);
+        assert_eq!(resolve_protocol(Renderer::Iterm2), Protocol::Iterm2);
     }
 }

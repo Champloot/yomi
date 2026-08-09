@@ -1,0 +1,20 @@
+[package]
+name = "yomi-viewer"
+description = "Отображение страниц манги в терминале: источники страниц и рендеринг"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+yomi-core = { path = "../yomi-core" }
+thiserror.workspace = true
+tracing.workspace = true
+image = { version = "0.24", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
+zip = { version = "0.6", default-features = false, features = ["deflate"] }
+crossterm = "0.27"
+base64 = "0.21"
+
+[dev-dependencies]
+tempfile = "3"

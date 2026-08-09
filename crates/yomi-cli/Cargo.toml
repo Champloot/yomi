@@ -14,6 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 yomi-core = { path = "../yomi-core" }
+yomi-viewer = { path = "../yomi-viewer" }
 anyhow.workspace = true
 clap.workspace = true
 tracing.workspace = true

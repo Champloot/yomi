@@ -163,3 +163,30 @@ fn reading_missing_path_fails() {
     let out = run(&dir, &["read", "/этого/точно/нет.cbz"]);
     assert_eq!(code(&out), 1);
 }
+
+#[test]
+fn reading_cbr_gives_specific_unsupported_message() {
+    let dir = temp_dir("readcbr");
+    let cbr = dir.join("chapter.cbr");
+    std::fs::write(&cbr, b"not really rar, format check happens by extension").unwrap();
+    let out = run(&dir, &["read", cbr.to_str().unwrap()]);
+    assert_eq!(code(&out), 1);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("CBR"),
+        "сообщение должно называть формат явно: {stderr}"
+    );
+}
+
+#[test]
+fn reading_page_zero_is_rejected_before_touching_the_terminal() {
+    let dir = temp_dir("readpage0");
+    let cbz = dir.join("empty.cbz");
+    // Файл не обязан быть валидным CBZ: страница 0 отклоняется раньше,
+    // чем источник вообще открывается.
+    std::fs::write(&cbz, b"stub").unwrap();
+    let out = run(&dir, &["read", cbz.to_str().unwrap(), "-p", "0"]);
+    assert_eq!(code(&out), 1);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("с единицы"), "{stderr}");
+}
