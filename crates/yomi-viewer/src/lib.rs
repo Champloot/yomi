@@ -8,6 +8,7 @@
 //! командной строки и не знает про `clap` — только про терминал и картинки.
 
 pub mod archive;
+pub mod cache;
 pub mod capability;
 mod error;
 pub mod fit;

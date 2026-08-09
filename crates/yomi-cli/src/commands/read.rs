@@ -113,8 +113,14 @@ pub async fn run(ctx: &Ctx, args: &ReadArgs) -> Result<()> {
         fit,
         upscale,
     };
-    yomi_viewer::reader::run(&source, opts, direction, start)
-        .map_err(|e| anyhow::anyhow!(e).context("отображение страниц"))
+    yomi_viewer::reader::run(
+        &source,
+        opts,
+        direction,
+        ctx.config.reader.preload_pages,
+        start,
+    )
+    .map_err(|e| anyhow::anyhow!(e).context("отображение страниц"))
 }
 
 #[cfg(test)]

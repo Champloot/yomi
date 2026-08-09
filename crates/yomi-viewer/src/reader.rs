@@ -1,6 +1,7 @@
 //! Интерактивный цикл чтения: показ страницы, обработка клавиш, ресайз.
 
 use crate::archive::PageSource;
+use crate::cache::PageCache;
 use crate::render::Options;
 use crate::{terminal, Error, Result};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
@@ -99,6 +100,7 @@ pub fn run(
     source: &PageSource,
     opts: Options,
     direction: Direction,
+    preload: u8,
     start_page: usize,
 ) -> Result<()> {
     let mut current = start_page.min(source.page_count().saturating_sub(1));
@@ -106,7 +108,7 @@ pub fn run(
     enable_raw_mode().map_err(|e| Error::Terminal(e.to_string()))?;
     // Гарантируем возврат терминала в нормальный режим даже при ошибке
     // рендера — иначе пользователь останется с «немым» терминалом.
-    let result = run_loop(source, opts, direction, &mut current);
+    let result = run_loop(source, opts, direction, preload, &mut current);
     let _ = disable_raw_mode();
     print!("\r\n");
     let _ = std::io::stdout().flush();
@@ -117,13 +119,26 @@ fn run_loop(
     source: &PageSource,
     opts: Options,
     direction: Direction,
+    preload: u8,
     current: &mut usize,
 ) -> Result<()> {
     let mut stdout = std::io::stdout();
     let total = source.page_count();
+    let mut cache = PageCache::new(preload);
 
     loop {
-        draw_page(source, opts, direction, *current, total, &mut stdout)?;
+        draw_page(
+            source,
+            &mut cache,
+            opts,
+            direction,
+            *current,
+            total,
+            &mut stdout,
+        )?;
+        // Соседние страницы готовим после отрисовки текущей, чтобы
+        // предзагрузка не откладывала то, чего читатель ждёт прямо сейчас.
+        cache.preload_around(source, *current);
 
         let input = input_for(event::read().map_err(|e| Error::Terminal(e.to_string()))?);
         match action_for(input, direction) {
@@ -141,19 +156,19 @@ fn run_loop(
 
 fn draw_page(
     source: &PageSource,
+    cache: &mut PageCache,
     opts: Options,
     direction: Direction,
     index: usize,
     total: usize,
     stdout: &mut impl Write,
 ) -> Result<()> {
-    let bytes = source.read_page(index)?;
-    let img = image::load_from_memory(&bytes)?;
     let mut size = terminal::size()?;
     // Строка снизу оставлена под статус — не отдаём под картинку весь экран.
     size.rows = size.rows.saturating_sub(1);
 
-    let rendered = crate::render::render(&img, size, opts)?;
+    let img = cache.get(source, index)?;
+    let rendered = crate::render::render(img, size, opts)?;
 
     // 2J очищает экран, H переводит курсор в начало — полная перерисовка
     // при каждой странице проще инкрементальной и достаточно быстрая
