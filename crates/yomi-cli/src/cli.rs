@@ -80,6 +80,14 @@ pub struct ReadArgs {
     /// Переопределить способ вывода изображений
     #[arg(long, value_enum)]
     pub renderer: Option<RendererArg>,
+
+    /// Как вписывать страницу в окно
+    #[arg(long, value_enum)]
+    pub fit: Option<FitArg>,
+
+    /// Разрешить увеличивать страницу сверх её разрешения
+    #[arg(long)]
+    pub upscale: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -183,6 +191,26 @@ pub enum RendererArg {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum FitArg {
+    Contain,
+    Width,
+    Height,
+    Original,
+}
+
+impl From<FitArg> for yomi_core::config::Fit {
+    fn from(f: FitArg) -> Self {
+        use yomi_core::config::Fit;
+        match f {
+            FitArg::Contain => Fit::Contain,
+            FitArg::Width => Fit::Width,
+            FitArg::Height => Fit::Height,
+            FitArg::Original => Fit::Original,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum SortArg {
     Relevance,
     Popularity,
@@ -250,6 +278,19 @@ mod tests {
         match cli.command {
             Command::Search(a) => assert_eq!(a.genre, vec!["драма", "школа"]),
             _ => panic!("ожидалась команда search"),
+        }
+    }
+
+    #[test]
+    fn read_accepts_fit_and_upscale() {
+        let cli =
+            Cli::try_parse_from(["yomi", "read", "a.cbz", "--fit", "width", "--upscale"]).unwrap();
+        match cli.command {
+            Command::Read(a) => {
+                assert_eq!(a.fit, Some(FitArg::Width));
+                assert!(a.upscale);
+            }
+            _ => panic!("ожидалась команда read"),
         }
     }
 

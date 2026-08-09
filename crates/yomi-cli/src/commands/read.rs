@@ -8,9 +8,11 @@
 use super::Ctx;
 use crate::cli::ReadArgs;
 use anyhow::{bail, Result};
-use yomi_core::config::Renderer;
+use yomi_core::config::{Fit as ConfigFit, Renderer};
 use yomi_viewer::archive::PageSource;
 use yomi_viewer::capability::{self, Protocol};
+use yomi_viewer::fit::Fit;
+use yomi_viewer::render::Options;
 
 /// Переводит выбор из конфига/флага в протокол. `Auto` — единственный
 /// вариант, требующий обращения к окружению процесса; остальные —
@@ -22,6 +24,18 @@ fn resolve_protocol(renderer: Renderer) -> Protocol {
         Renderer::Iterm2 => Protocol::Iterm2,
         Renderer::Sixel => Protocol::Sixel,
         Renderer::Blocks => Protocol::Blocks,
+    }
+}
+
+/// Переводит режим вписывания из конфига в тип рендера. Два одинаковых
+/// перечисления существуют намеренно: конфиг — часть публичного формата
+/// файла, а `yomi-viewer` не должен от него зависеть.
+fn resolve_fit(fit: ConfigFit) -> Fit {
+    match fit {
+        ConfigFit::Contain => Fit::Contain,
+        ConfigFit::Width => Fit::Width,
+        ConfigFit::Height => Fit::Height,
+        ConfigFit::Original => Fit::Original,
     }
 }
 
@@ -55,10 +69,18 @@ pub async fn run(ctx: &Ctx, args: &ReadArgs) -> Result<()> {
     let source = PageSource::open(&args.path)
         .map_err(|e| anyhow::anyhow!(e).context(format!("открытие {}", args.path.display())))?;
 
+    let fit = resolve_fit(args.fit.map(Into::into).unwrap_or(ctx.config.reader.fit));
+    // Флаг командной строки только включает увеличение, но не выключает
+    // его: выключить можно в конфиге, а два взаимоисключающих флага ради
+    // этого заводить не стоит.
+    let upscale = args.upscale || ctx.config.reader.upscale;
+
     tracing::info!(
         path = %args.path.display(),
         pages = source.page_count(),
         protocol = protocol.label_ru(),
+        ?fit,
+        upscale,
         direction = ?ctx.config.reader.direction,
         "запуск читалки"
     );
@@ -72,7 +94,12 @@ pub async fn run(ctx: &Ctx, args: &ReadArgs) -> Result<()> {
         );
     }
 
-    yomi_viewer::reader::run(&source, protocol, start)
+    let opts = Options {
+        protocol,
+        fit,
+        upscale,
+    };
+    yomi_viewer::reader::run(&source, opts, start)
         .map_err(|e| anyhow::anyhow!(e).context("отображение страниц"))
 }
 

@@ -10,6 +10,7 @@
 pub mod archive;
 pub mod capability;
 mod error;
+pub mod fit;
 mod natural_sort;
 pub mod reader;
 pub mod render;
@@ -17,3 +18,4 @@ pub mod terminal;
 
 pub use capability::Protocol;
 pub use error::{Error, Result};
+pub use fit::{Cell, Fit};

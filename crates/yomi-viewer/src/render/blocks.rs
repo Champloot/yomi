@@ -6,34 +6,47 @@
 //! символов терминала передаёт две строки пикселей — вдвое лучше, чем
 //! просто закрашенные клетки.
 
-use image::{DynamicImage, GenericImageView};
+use crate::fit::Layout;
+use image::DynamicImage;
 use std::fmt::Write as _;
 
 /// Рендерит изображение в строку с ANSI-кодами, готовую для печати.
 ///
-/// `max_cols`/`max_rows` — доступное место в терминале, в ячейках текста.
-/// Изображение вписывается с сохранением пропорций.
-pub fn render(img: &DynamicImage, max_cols: u16, max_rows: u16) -> String {
-    // Ячейка терминала визуально примерно вдвое выше, чем широка,
-    // а мы кодируем два вертикальных пикселя на одну ячейку — итоговое
-    // приближение к квадратному пикселю на выходе.
-    let target_w = (max_cols as u32).max(1);
-    let target_h = (max_rows as u32 * 2).max(2);
+/// Размеры берёт из уже посчитанной [`Layout`] — та же геометрия, что и
+/// у kitty, поэтому смена протокола не меняет масштаб страницы.
+///
+/// Качество здесь принципиально ниже: одна ячейка терминала передаёт два
+/// пикселя, то есть страница ужимается до примерно 80x50 «пикселей».
+/// Это последний рубеж деградации для терминалов без графики, а не
+/// равноценная замена kitty.
+pub fn render(img: &DynamicImage, layout: Layout) -> String {
+    // Пиксельная сетка блоков: одна ячейка по горизонтали — один пиксель,
+    // по вертикали — два (символ верхнего полублока).
+    let grid_w = layout.cols.max(1) as u32;
+    let grid_h = (layout.rows.max(1) as u32) * 2;
 
-    let (orig_w, orig_h) = img.dimensions();
+    // Пропорции уже учтены в Layout, но там они выражены в пикселях
+    // экрана; переводим в сетку блоков, сохраняя соотношение сторон.
     let scale = f64::min(
-        target_w as f64 / orig_w as f64,
-        target_h as f64 / orig_h as f64,
+        grid_w as f64 / layout.image_w as f64,
+        grid_h as f64 / layout.image_h as f64,
     );
-    let new_w = ((orig_w as f64 * scale).round() as u32).max(1);
-    // Высота обязана быть чётной: каждая пара строк пикселей — одна строка текста.
-    let mut new_h = ((orig_h as f64 * scale).round() as u32).max(2);
+    let mut new_w = ((layout.image_w as f64 * scale).round() as u32).max(1);
+    let mut new_h = ((layout.image_h as f64 * scale).round() as u32).max(2);
+    new_w = new_w.min(grid_w);
+    // Высота обязана быть чётной: пара строк пикселей — одна строка текста.
     if new_h % 2 != 0 {
         new_h += 1;
     }
+    new_h = new_h.min(grid_h);
+    if new_h < 2 {
+        new_h = 2;
+    }
 
+    // Lanczos3 заметно чище Triangle на сильном уменьшении, а уменьшение
+    // здесь всегда сильное.
     let resized = img
-        .resize_exact(new_w, new_h, image::imageops::FilterType::Triangle)
+        .resize_exact(new_w, new_h, image::imageops::FilterType::Lanczos3)
         .to_rgb8();
 
     let mut out = String::with_capacity((new_w * new_h / 2 * 20) as usize);
@@ -55,38 +68,64 @@ pub fn render(img: &DynamicImage, max_cols: u16, max_rows: u16) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fit::{Cell, Fit};
     use image::{Rgb, RgbImage};
 
     fn solid(w: u32, h: u32, color: [u8; 3]) -> DynamicImage {
         DynamicImage::ImageRgb8(RgbImage::from_pixel(w, h, Rgb(color)))
     }
 
+    fn layout_for(img: &DynamicImage, cols: u16, rows: u16) -> Layout {
+        crate::fit::compute(
+            img.width(),
+            img.height(),
+            cols,
+            rows,
+            Cell::FALLBACK,
+            Fit::Contain,
+            true,
+        )
+    }
+
     #[test]
     fn output_ends_each_row_with_reset_and_newline() {
         let img = solid(4, 4, [10, 20, 30]);
-        let out = render(&img, 10, 10);
+        let out = render(&img, layout_for(&img, 10, 10));
         assert!(out.contains("\x1b[0m\r\n"));
     }
 
     #[test]
-    fn produces_one_text_row_per_two_pixel_rows() {
-        let img = solid(2, 4, [255, 0, 0]);
-        // max_rows=2 -> target_h=4, совпадает с высотой картинки без масштаба.
-        let out = render(&img, 2, 2);
-        let rows = out.matches("\r\n").count();
-        assert_eq!(rows, 2, "4 пиксельные строки должны дать 2 строки текста");
-    }
-
-    #[test]
     fn embeds_true_color_escape_codes() {
-        let img = solid(1, 2, [255, 128, 0]);
-        let out = render(&img, 1, 1);
+        let img = solid(8, 16, [255, 128, 0]);
+        let out = render(&img, layout_for(&img, 4, 4));
         assert!(out.contains("\x1b[38;2;255;128;0m"));
     }
 
     #[test]
-    fn does_not_panic_on_odd_height_source() {
+    fn number_of_text_rows_never_exceeds_available_rows() {
+        let img = solid(100, 400, [1, 2, 3]);
+        let rows_available = 10;
+        let out = render(&img, layout_for(&img, 40, rows_available));
+        let printed = out.matches("\r\n").count();
+        assert!(
+            printed <= rows_available as usize,
+            "напечатано {printed} строк при доступных {rows_available}"
+        );
+    }
+
+    #[test]
+    fn does_not_panic_on_odd_dimensions() {
         let img = solid(3, 3, [1, 2, 3]);
-        let _ = render(&img, 5, 5);
+        let _ = render(&img, layout_for(&img, 5, 5));
+    }
+
+    #[test]
+    fn tall_page_and_wide_page_both_stay_within_bounds() {
+        for (w, h) in [(400u32, 1200u32), (1200, 400)] {
+            let img = solid(w, h, [7, 7, 7]);
+            let out = render(&img, layout_for(&img, 80, 24));
+            let printed = out.matches("\r\n").count();
+            assert!(printed <= 24, "{w}x{h}: {printed} строк");
+        }
     }
 }

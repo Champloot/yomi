@@ -75,11 +75,31 @@ pub enum ReadingDirection {
     Webtoon,
 }
 
+/// Как вписывать страницу в окно терминала.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum Fit {
+    /// Целиком в окно с сохранением пропорций.
+    #[default]
+    Contain,
+    /// По ширине окна — обычный режим для вебтунов.
+    Width,
+    /// По высоте окна.
+    Height,
+    /// Один пиксель картинки — один пиксель экрана.
+    Original,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Reader {
     pub renderer: Renderer,
     pub direction: ReadingDirection,
+    /// Как вписывать страницу в окно.
+    pub fit: Fit,
+    /// Разрешить растягивать страницу сверх её собственного разрешения.
+    /// По умолчанию выключено: увеличенная страница выглядит мыльной.
+    pub upscale: bool,
     /// Разворот из двух страниц, если ширина терминала позволяет.
     pub double_page: bool,
     /// Сколько страниц подгружать вперёд.
@@ -91,6 +111,8 @@ impl Default for Reader {
         Self {
             renderer: Renderer::Auto,
             direction: ReadingDirection::RightToLeft,
+            fit: Fit::Contain,
+            upscale: false,
             double_page: false,
             preload_pages: 2,
         }
@@ -194,6 +216,21 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reader_does_not_upscale_by_default() {
+        // Умолчание выбрано по жалобе на мыльную картинку в полноэкранном
+        // терминале: лучше поля вокруг страницы, чем растянутые пиксели.
+        let c = Config::default();
+        assert!(!c.reader.upscale);
+        assert_eq!(c.reader.fit, Fit::Contain);
+    }
+
+    #[test]
+    fn fit_parses_from_kebab_case() {
+        let c = Config::from_toml("[reader]\nfit = \"width\"\n").unwrap();
+        assert_eq!(c.reader.fit, Fit::Width);
+    }
 
     #[test]
     fn defaults_are_russian_first() {

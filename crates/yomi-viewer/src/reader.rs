@@ -1,7 +1,7 @@
 //! Интерактивный цикл чтения: показ страницы, обработка клавиш, ресайз.
 
 use crate::archive::PageSource;
-use crate::capability::Protocol;
+use crate::render::Options;
 use crate::{terminal, Error, Result};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
@@ -37,25 +37,25 @@ fn action_for(event: Event) -> Action {
 }
 
 /// Запускает интерактивное чтение. Блокирует до выхода пользователя.
-pub fn run(source: &PageSource, protocol: Protocol, start_page: usize) -> Result<()> {
+pub fn run(source: &PageSource, opts: Options, start_page: usize) -> Result<()> {
     let mut current = start_page.min(source.page_count().saturating_sub(1));
 
     enable_raw_mode().map_err(|e| Error::Terminal(e.to_string()))?;
     // Гарантируем возврат терминала в нормальный режим даже при ошибке
     // рендера — иначе пользователь останется с «немым» терминалом.
-    let result = run_loop(source, protocol, &mut current);
+    let result = run_loop(source, opts, &mut current);
     let _ = disable_raw_mode();
     print!("\r\n");
     let _ = std::io::stdout().flush();
     result
 }
 
-fn run_loop(source: &PageSource, protocol: Protocol, current: &mut usize) -> Result<()> {
+fn run_loop(source: &PageSource, opts: Options, current: &mut usize) -> Result<()> {
     let mut stdout = std::io::stdout();
     let total = source.page_count();
 
     loop {
-        draw_page(source, protocol, *current, total, &mut stdout)?;
+        draw_page(source, opts, *current, total, &mut stdout)?;
 
         match action_for(event::read().map_err(|e| Error::Terminal(e.to_string()))?) {
             Action::Next if *current + 1 < total => *current += 1,
@@ -72,18 +72,18 @@ fn run_loop(source: &PageSource, protocol: Protocol, current: &mut usize) -> Res
 
 fn draw_page(
     source: &PageSource,
-    protocol: Protocol,
+    opts: Options,
     index: usize,
     total: usize,
     stdout: &mut impl Write,
 ) -> Result<()> {
     let bytes = source.read_page(index)?;
     let img = image::load_from_memory(&bytes)?;
-    let size = terminal::size()?;
+    let mut size = terminal::size()?;
     // Строка снизу оставлена под статус — не отдаём под картинку весь экран.
-    let usable_rows = size.rows.saturating_sub(1);
+    size.rows = size.rows.saturating_sub(1);
 
-    let rendered = crate::render::render(&img, protocol, size.cols, usable_rows)?;
+    let rendered = crate::render::render(&img, size, opts)?;
 
     // 2J очищает экран, H переводит курсор в начало — полная перерисовка
     // при каждой странице проще инкрементальной и достаточно быстрая
