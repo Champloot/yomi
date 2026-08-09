@@ -1,0 +1,21 @@
+[package]
+name = "yomi"
+description = "Терминальная читалка манги для Linux"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Имя исполняемого файла — короткое: пользователь набирает его руками.
+[[bin]]
+name = "yomi"
+path = "src/main.rs"
+
+[dependencies]
+yomi-core = { path = "../yomi-core" }
+anyhow.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tokio.workspace = true

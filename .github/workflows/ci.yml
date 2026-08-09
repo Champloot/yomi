@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings   # любое предупреждение роняет сборку
+
+jobs:
+  check:
+    name: Проверки
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Установка Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Кэш сборки
+        uses: Swatinem/rust-cache@v2
+
+      - name: Форматирование
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features
+
+      - name: Тесты
+        run: cargo test --all-features
+
+      - name: Сборка релиза
+        run: cargo build --release
+
+  msrv:
+    name: Минимальная версия Rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.75.0
+      - uses: Swatinem/rust-cache@v2
+      # --locked: собираем ровно теми версиями, что записаны в Cargo.lock.
+      # Без него cargo подтянет свежие зависимости, требующие нового rustc.
+      - run: cargo build --locked
