@@ -88,6 +88,10 @@ pub struct ReadArgs {
     /// Разрешить увеличивать страницу сверх её разрешения
     #[arg(long)]
     pub upscale: bool,
+
+    /// Направление чтения
+    #[arg(long, value_enum)]
+    pub direction: Option<DirectionArg>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -191,6 +195,27 @@ pub enum RendererArg {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum DirectionArg {
+    /// Справа налево — традиционная манга
+    Rtl,
+    /// Слева направо — комиксы, переведённые издания
+    Ltr,
+    /// Вертикальная лента — манхва, маньхуа
+    Webtoon,
+}
+
+impl From<DirectionArg> for yomi_core::config::ReadingDirection {
+    fn from(d: DirectionArg) -> Self {
+        use yomi_core::config::ReadingDirection;
+        match d {
+            DirectionArg::Rtl => ReadingDirection::RightToLeft,
+            DirectionArg::Ltr => ReadingDirection::LeftToRight,
+            DirectionArg::Webtoon => ReadingDirection::Webtoon,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum FitArg {
     Contain,
     Width,
@@ -290,6 +315,15 @@ mod tests {
                 assert_eq!(a.fit, Some(FitArg::Width));
                 assert!(a.upscale);
             }
+            _ => panic!("ожидалась команда read"),
+        }
+    }
+
+    #[test]
+    fn read_accepts_direction() {
+        let cli = Cli::try_parse_from(["yomi", "read", "a.cbz", "--direction", "ltr"]).unwrap();
+        match cli.command {
+            Command::Read(a) => assert_eq!(a.direction, Some(DirectionArg::Ltr)),
             _ => panic!("ожидалась команда read"),
         }
     }

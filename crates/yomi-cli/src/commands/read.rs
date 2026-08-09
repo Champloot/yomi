@@ -8,10 +8,11 @@
 use super::Ctx;
 use crate::cli::ReadArgs;
 use anyhow::{bail, Result};
-use yomi_core::config::{Fit as ConfigFit, Renderer};
+use yomi_core::config::{Fit as ConfigFit, ReadingDirection, Renderer};
 use yomi_viewer::archive::PageSource;
 use yomi_viewer::capability::{self, Protocol};
 use yomi_viewer::fit::Fit;
+use yomi_viewer::reader::Direction;
 use yomi_viewer::render::Options;
 
 /// Переводит выбор из конфига/флага в протокол. `Auto` — единственный
@@ -36,6 +37,14 @@ fn resolve_fit(fit: ConfigFit) -> Fit {
         ConfigFit::Width => Fit::Width,
         ConfigFit::Height => Fit::Height,
         ConfigFit::Original => Fit::Original,
+    }
+}
+
+fn resolve_direction(d: ReadingDirection) -> Direction {
+    match d {
+        ReadingDirection::RightToLeft => Direction::RightToLeft,
+        ReadingDirection::LeftToRight => Direction::LeftToRight,
+        ReadingDirection::Webtoon => Direction::Webtoon,
     }
 }
 
@@ -74,6 +83,11 @@ pub async fn run(ctx: &Ctx, args: &ReadArgs) -> Result<()> {
     // его: выключить можно в конфиге, а два взаимоисключающих флага ради
     // этого заводить не стоит.
     let upscale = args.upscale || ctx.config.reader.upscale;
+    let direction = resolve_direction(
+        args.direction
+            .map(Into::into)
+            .unwrap_or(ctx.config.reader.direction),
+    );
 
     tracing::info!(
         path = %args.path.display(),
@@ -81,7 +95,7 @@ pub async fn run(ctx: &Ctx, args: &ReadArgs) -> Result<()> {
         protocol = protocol.label_ru(),
         ?fit,
         upscale,
-        direction = ?ctx.config.reader.direction,
+        ?direction,
         "запуск читалки"
     );
 
@@ -99,7 +113,7 @@ pub async fn run(ctx: &Ctx, args: &ReadArgs) -> Result<()> {
         fit,
         upscale,
     };
-    yomi_viewer::reader::run(&source, opts, start)
+    yomi_viewer::reader::run(&source, opts, direction, start)
         .map_err(|e| anyhow::anyhow!(e).context("отображение страниц"))
 }
 
@@ -114,6 +128,18 @@ mod tests {
         std::env::remove_var("KITTY_WINDOW_ID");
         std::env::remove_var("TERM_PROGRAM");
         assert_eq!(resolve_protocol(Renderer::Auto), Protocol::Blocks);
+    }
+
+    #[test]
+    fn direction_maps_from_config_without_surprises() {
+        assert_eq!(
+            resolve_direction(ReadingDirection::RightToLeft),
+            Direction::RightToLeft
+        );
+        assert_eq!(
+            resolve_direction(ReadingDirection::Webtoon),
+            Direction::Webtoon
+        );
     }
 
     #[test]

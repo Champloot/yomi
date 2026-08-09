@@ -19,3 +19,4 @@ pub mod terminal;
 pub use capability::Protocol;
 pub use error::{Error, Result};
 pub use fit::{Cell, Fit};
+pub use reader::Direction;
