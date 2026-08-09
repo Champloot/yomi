@@ -48,6 +48,9 @@ pub enum Command {
     /// Читать мангу: файл, каталог или тайтл из библиотеки
     Read(ReadArgs),
 
+    /// Что внутри файла: том или глава, сколько страниц, есть ли разбиение
+    Info(InfoArgs),
+
     /// Локальная библиотека
     #[command(subcommand)]
     Library(LibraryCommand),
@@ -92,6 +95,13 @@ pub struct ReadArgs {
     /// Направление чтения
     #[arg(long, value_enum)]
     pub direction: Option<DirectionArg>,
+}
+
+#[derive(Debug, Args)]
+pub struct InfoArgs {
+    /// Путь к CBZ-архиву, каталогу или изображению
+    #[arg(value_name = "ПУТЬ")]
+    pub path: PathBuf,
 }
 
 #[derive(Debug, Subcommand)]

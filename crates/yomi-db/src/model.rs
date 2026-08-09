@@ -36,6 +36,8 @@ pub struct LibraryChapter {
     pub language: String,
     pub scanlator: Option<String>,
     pub page_count: Option<u32>,
+    /// «chapter», «volume», «single» или «unknown».
+    pub kind: String,
 }
 
 impl LibraryChapter {
@@ -96,6 +98,7 @@ pub struct ScannedChapter {
     pub language: String,
     pub scanlator: Option<String>,
     pub page_count: Option<u32>,
+    pub kind: String,
 }
 
 #[cfg(test)]
@@ -113,6 +116,7 @@ mod tests {
             language: "ru".into(),
             scanlator: None,
             page_count: None,
+            kind: "chapter".into(),
         }
     }
 

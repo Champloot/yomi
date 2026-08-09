@@ -47,6 +47,15 @@ fn to_db(found: yomi_viewer::scan::ScannedManga) -> ScannedManga {
                 language: c.language,
                 scanlator: c.scanlator,
                 page_count: c.page_count,
+                // В базе тип хранится строкой: перечисление живёт
+                // в yomi-viewer, а зависеть от него хранилищу незачем.
+                kind: match c.kind {
+                    yomi_viewer::structure::FileKind::Chapter => "chapter",
+                    yomi_viewer::structure::FileKind::Volume => "volume",
+                    yomi_viewer::structure::FileKind::Single => "single",
+                    yomi_viewer::structure::FileKind::Unknown => "unknown",
+                }
+                .to_string(),
             })
             .collect(),
     }
@@ -192,7 +201,19 @@ fn chapters(manga_id: i64) -> Result<()> {
             Some(p) => format!("{}", p.page + 1),
             None => "·".to_string(),
         };
-        println!("{mark:>4}  {:<32} {}", chapter.label(), chapter.external_id);
+        let kind = match chapter.kind.as_str() {
+            "volume" => "том",
+            "chapter" => "глава",
+            "single" => "изобр.",
+            _ => "—",
+        };
+        println!(
+            "{mark:>4}  {:<24} {:<7} {:>4} стр.  {}",
+            chapter.label(),
+            kind,
+            chapter.page_count.unwrap_or(0),
+            chapter.external_id
+        );
     }
     println!("\nОткрыть: yomi read ПУТЬ");
     Ok(())

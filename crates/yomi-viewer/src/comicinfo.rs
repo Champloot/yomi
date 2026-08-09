@@ -27,6 +27,19 @@ pub struct ComicInfo {
     /// Команда перевода (тег `Translator` или `Publisher`).
     pub scanlator: Option<String>,
     pub page_count: Option<u32>,
+    /// Закладки из блока `<Pages>`: штатный способ отметить, с какой
+    /// страницы начинается глава внутри тома. Их проставляют Komga,
+    /// Kavita и ComicRack, и это единственный достоверный источник
+    /// разбиения тома на главы.
+    pub bookmarks: Vec<Bookmark>,
+}
+
+/// Отметка «здесь начинается глава».
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bookmark {
+    /// Номер страницы с нуля.
+    pub page: u32,
+    pub title: String,
 }
 
 /// Значения тега, разделённые запятой: `Автор А., Автор Б.`
@@ -72,7 +85,47 @@ pub fn parse(xml: &str) -> ComicInfo {
             .or_else(|| tag(xml, "Publisher"))
             .map(unescape),
         page_count: tag(xml, "PageCount").and_then(|v| v.parse().ok()),
+        bookmarks: parse_bookmarks(xml),
     }
+}
+
+/// Вытаскивает закладки из самозакрывающихся тегов `<Page .../>`.
+///
+/// Пример строки: `<Page Image="24" Bookmark="Глава 3" Type="Story"/>`.
+/// Атрибуты идут в произвольном порядке, поэтому ищем каждый отдельно.
+fn parse_bookmarks(xml: &str) -> Vec<Bookmark> {
+    let mut found = Vec::new();
+
+    for chunk in xml.split("<Page").skip(1) {
+        let Some(end) = chunk.find('>') else { continue };
+        let attrs = &chunk[..end];
+
+        let Some(title) = attribute(attrs, "Bookmark") else {
+            continue;
+        };
+        if title.trim().is_empty() {
+            continue;
+        }
+        let Some(page) = attribute(attrs, "Image").and_then(|v| v.parse::<u32>().ok()) else {
+            continue;
+        };
+        found.push(Bookmark {
+            page,
+            title: unescape(&title),
+        });
+    }
+
+    found.sort_by_key(|b| b.page);
+    found.dedup_by_key(|b| b.page);
+    found
+}
+
+/// Значение атрибута в двойных кавычках.
+fn attribute(attrs: &str, name: &str) -> Option<String> {
+    let needle = format!("{name}=\"");
+    let start = attrs.find(&needle)? + needle.len();
+    let end = attrs[start..].find('"')? + start;
+    Some(attrs[start..end].to_string())
 }
 
 /// Возвращает пять обязательных XML-сущностей в исходный вид.
@@ -91,13 +144,13 @@ mod tests {
 
     const SAMPLE: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <ComicInfo>
-  <Series>Усогуй</Series>
+  <Series>Название серии</Series>
   <Title>Ставка на жизнь</Title>
   <Number>12.5</Number>
   <Volume>32</Volume>
   <Year>2011</Year>
-  <Writer>Мадзима Тосио</Writer>
-  <Penciller>Мадзима Тосио</Penciller>
+  <Writer>Автор А.</Writer>
+  <Penciller>Художник Б.</Penciller>
   <Genre>сэйнэн, психологический, азартные игры</Genre>
   <LanguageISO>ru</LanguageISO>
   <Translator>Вымышленная команда</Translator>
@@ -108,7 +161,7 @@ mod tests {
     #[test]
     fn parses_a_complete_file() {
         let info = parse(SAMPLE);
-        assert_eq!(info.series.as_deref(), Some("Усогуй"));
+        assert_eq!(info.series.as_deref(), Some("Название серии"));
         assert_eq!(info.title.as_deref(), Some("Ставка на жизнь"));
         assert_eq!(info.number, Some(12.5));
         assert_eq!(info.volume, Some(32));
@@ -125,7 +178,7 @@ mod tests {
             info.genres,
             vec!["сэйнэн", "психологический", "азартные игры"]
         );
-        assert_eq!(info.writers, vec!["Мадзима Тосио"]);
+        assert_eq!(info.writers, vec!["Автор А."]);
     }
 
     #[test]
@@ -163,9 +216,62 @@ mod tests {
 
     #[test]
     fn garbage_input_does_not_panic() {
-        for input in ["", "не xml вовсе", "<ComicInfo>", "<<<>>>"] {
+        for input in [
+            "",
+            "не xml вовсе",
+            "<ComicInfo>",
+            "<<<>>>",
+            "<Page Image=",
+            "<Page/>",
+        ] {
             let _ = parse(input);
         }
+    }
+
+    #[test]
+    fn reads_chapter_bookmarks_from_pages_block() {
+        let xml = r#"<ComicInfo><Pages>
+            <Page Image="0" Type="FrontCover"/>
+            <Page Image="2" Bookmark="Глава 1" Type="Story"/>
+            <Page Image="24" Bookmark="Глава 2"/>
+        </Pages></ComicInfo>"#;
+        let info = parse(xml);
+        assert_eq!(info.bookmarks.len(), 2, "страницы без Bookmark — не главы");
+        assert_eq!(
+            info.bookmarks[0],
+            Bookmark {
+                page: 2,
+                title: "Глава 1".into()
+            }
+        );
+        assert_eq!(info.bookmarks[1].page, 24);
+    }
+
+    #[test]
+    fn bookmarks_are_sorted_by_page() {
+        let xml = r#"<ComicInfo><Pages>
+            <Page Bookmark="Вторая" Image="30"/>
+            <Page Bookmark="Первая" Image="5"/>
+        </Pages></ComicInfo>"#;
+        let pages: Vec<u32> = parse(xml).bookmarks.iter().map(|b| b.page).collect();
+        assert_eq!(pages, vec![5, 30]);
+    }
+
+    #[test]
+    fn bookmark_without_image_number_is_skipped() {
+        let xml = r#"<ComicInfo><Pages><Page Bookmark="Без номера"/></Pages></ComicInfo>"#;
+        assert!(parse(xml).bookmarks.is_empty());
+    }
+
+    #[test]
+    fn empty_bookmark_is_not_a_chapter() {
+        let xml = r#"<ComicInfo><Pages><Page Image="3" Bookmark=""/></Pages></ComicInfo>"#;
+        assert!(parse(xml).bookmarks.is_empty());
+    }
+
+    #[test]
+    fn file_without_pages_block_has_no_bookmarks() {
+        assert!(parse(SAMPLE).bookmarks.is_empty());
     }
 
     #[test]

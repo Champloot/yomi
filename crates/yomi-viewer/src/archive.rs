@@ -116,6 +116,35 @@ impl PageSource {
         }
     }
 
+    /// Имена страниц в порядке чтения — нужны для распознавания
+    /// структуры тома (см. [`crate::structure`]).
+    pub fn entry_names(&self) -> Vec<String> {
+        match self {
+            Self::Directory { files, .. } => files
+                .iter()
+                .map(|p| {
+                    p.file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default()
+                })
+                .collect(),
+            Self::Cbz { entries, .. } => entries.clone(),
+            Self::SingleFile { path } => vec![path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default()],
+        }
+    }
+
+    /// Путь к источнику — для сообщений и чтения метаданных.
+    pub fn path(&self) -> &Path {
+        match self {
+            Self::Directory { root, .. } => root,
+            Self::Cbz { path, .. } => path,
+            Self::SingleFile { path } => path,
+        }
+    }
+
     pub fn page_count(&self) -> usize {
         match self {
             Self::Directory { files, .. } => files.len(),

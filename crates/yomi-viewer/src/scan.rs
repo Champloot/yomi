@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! ~/Манга/
-//! ├── Усогуй/            <- тайтл
+//! ├── Название тайтла/    <- тайтл
 //! │   ├── Том 1.cbz      <- глава
 //! │   └── Том 2.cbz
 //! └── Другой тайтл/
@@ -31,6 +31,8 @@ pub struct ScannedChapter {
     pub language: String,
     pub scanlator: Option<String>,
     pub page_count: Option<u32>,
+    /// Том, глава или одиночное изображение.
+    pub kind: crate::structure::FileKind,
 }
 
 /// Найденный тайтл.
@@ -53,7 +55,9 @@ fn is_cbz(path: &Path) -> bool {
 }
 
 /// Достаёт `ComicInfo.xml` из CBZ, если он там есть.
-fn read_comicinfo(cbz: &Path) -> Option<ComicInfo> {
+///
+/// Публичная: тем же файлом пользуется команда `yomi info`.
+pub fn read_comicinfo(cbz: &Path) -> Option<ComicInfo> {
     let file = std::fs::File::open(cbz).ok()?;
     let mut archive = zip::ZipArchive::new(file).ok()?;
 
@@ -116,8 +120,12 @@ fn chapter_from_path(path: &Path) -> ScannedChapter {
     let (guessed_volume, guessed_number) = guess_numbers(&file_name);
 
     // Число страниц считаем сами: значение из ComicInfo часто врёт,
-    // а открыть архив мы всё равно можем.
-    let page_count = PageSource::open(path).ok().map(|s| s.page_count() as u32);
+    // а открыть архив мы всё равно можем. Заодно получаем имена
+    // страниц — по ним определяется, том это или глава.
+    let opened = PageSource::open(path).ok();
+    let page_count = opened.as_ref().map(|s| s.page_count() as u32);
+    let entries = opened.as_ref().map(|s| s.entry_names()).unwrap_or_default();
+    let kind = crate::structure::analyze(&file_name, &entries, info.as_ref()).kind;
 
     match info {
         Some(info) => ScannedChapter {
@@ -129,6 +137,7 @@ fn chapter_from_path(path: &Path) -> ScannedChapter {
             language: info.language.unwrap_or_else(|| "ru".to_string()),
             scanlator: info.scanlator,
             page_count: page_count.or(info.page_count),
+            kind,
         },
         None => ScannedChapter {
             path: path.to_path_buf(),
@@ -138,6 +147,7 @@ fn chapter_from_path(path: &Path) -> ScannedChapter {
             language: "ru".to_string(),
             scanlator: None,
             page_count,
+            kind,
         },
     }
 }
@@ -297,7 +307,7 @@ mod tests {
 
     #[test]
     fn guesses_volume_and_chapter_from_common_patterns() {
-        assert_eq!(guess_numbers("Usogui_VOL-32").0, Some(32));
+        assert_eq!(guess_numbers("Manga_VOL-32").0, Some(32));
         assert_eq!(guess_numbers("Том 3").0, Some(3));
         assert_eq!(guess_numbers("v05").0, Some(5));
         assert_eq!(guess_numbers("глава 12").1, Some(12.0));
@@ -312,14 +322,14 @@ mod tests {
     #[test]
     fn scans_title_directory_with_cbz_chapters() {
         let root = tempfile::tempdir().unwrap();
-        let title_dir = root.path().join("Усогуй");
+        let title_dir = root.path().join("Название тайтла");
         std::fs::create_dir(&title_dir).unwrap();
         make_cbz(&title_dir.join("Том 1.cbz"), 3, None);
         make_cbz(&title_dir.join("Том 2.cbz"), 4, None);
 
         let found = scan_library(root.path());
         assert_eq!(found.len(), 1);
-        assert_eq!(found[0].title, "Усогуй");
+        assert_eq!(found[0].title, "Название тайтла");
         assert_eq!(found[0].chapters.len(), 2);
         assert_eq!(found[0].chapters[0].volume, Some(1));
         assert_eq!(found[0].chapters[0].page_count, Some(3));

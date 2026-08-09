@@ -6,6 +6,7 @@
 
 mod config_cmd;
 mod download;
+mod info;
 mod library;
 mod read;
 mod search;
@@ -31,6 +32,7 @@ pub async fn dispatch(cli: &Cli) -> Result<()> {
 
     match &cli.command {
         Command::Read(args) => read::run(&ctx, args).await,
+        Command::Info(args) => info::run(args).await,
         Command::Library(cmd) => library::run(&ctx, cmd).await,
         Command::Search(args) => search::run(&ctx, args).await,
         Command::Download(args) => download::run(&ctx, args).await,

@@ -120,15 +120,16 @@ impl Store {
         for ch in &scanned.chapters {
             let changed = tx.execute(
                 "INSERT INTO chapters (manga_id, external_id, number, volume, title,
-                                       language, scanlator, page_count)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                                       language, scanlator, page_count, kind)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
                  ON CONFLICT (manga_id, external_id) DO UPDATE SET
                      number = excluded.number,
                      volume = excluded.volume,
                      title = excluded.title,
                      language = excluded.language,
                      scanlator = excluded.scanlator,
-                     page_count = excluded.page_count",
+                     page_count = excluded.page_count,
+                     kind = excluded.kind",
                 params![
                     manga_id,
                     ch.external_id,
@@ -138,6 +139,7 @@ impl Store {
                     ch.language,
                     ch.scanlator,
                     ch.page_count,
+                    ch.kind,
                 ],
             )?;
             added += changed;
@@ -177,7 +179,7 @@ impl Store {
     pub fn chapters_of(&self, manga_id: i64) -> Result<Vec<LibraryChapter>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, manga_id, external_id, number, volume, title, language,
-                    scanlator, page_count
+                    scanlator, page_count, kind
              FROM chapters
              WHERE manga_id = ?1
              ORDER BY volume NULLS LAST, number NULLS LAST, external_id",
@@ -191,7 +193,7 @@ impl Store {
             .conn
             .query_row(
                 "SELECT id, manga_id, external_id, number, volume, title, language,
-                        scanlator, page_count
+                        scanlator, page_count, kind
                  FROM chapters WHERE external_id = ?1",
                 params![path],
                 row_to_chapter,
@@ -255,7 +257,7 @@ impl Store {
             .conn
             .query_row(
                 "SELECT c.id, c.manga_id, c.external_id, c.number, c.volume, c.title,
-                        c.language, c.scanlator, c.page_count,
+                        c.language, c.scanlator, c.page_count, c.kind,
                         p.page, p.total_pages, p.completed
                  FROM progress p
                  JOIN chapters c ON c.id = p.chapter_id
@@ -267,9 +269,9 @@ impl Store {
                     let chapter = row_to_chapter(r)?;
                     let progress = Progress {
                         chapter_id: chapter.id,
-                        page: r.get::<_, i64>(9)? as u32,
-                        total_pages: r.get::<_, Option<i64>>(10)?.map(|v| v as u32),
-                        completed: r.get::<_, i64>(11)? != 0,
+                        page: r.get::<_, i64>(10)? as u32,
+                        total_pages: r.get::<_, Option<i64>>(11)?.map(|v| v as u32),
+                        completed: r.get::<_, i64>(12)? != 0,
                     };
                     Ok((chapter, progress))
                 },
@@ -282,7 +284,7 @@ impl Store {
     pub fn all_chapters(&self) -> Result<Vec<LibraryChapter>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, manga_id, external_id, number, volume, title, language,
-                    scanlator, page_count
+                    scanlator, page_count, kind
              FROM chapters ORDER BY manga_id, volume, number",
         )?;
         let rows = stmt.query_map([], row_to_chapter)?;
@@ -363,6 +365,7 @@ fn row_to_chapter(r: &Row<'_>) -> rusqlite::Result<LibraryChapter> {
         language: r.get(6)?,
         scanlator: r.get(7)?,
         page_count: r.get::<_, Option<i64>>(8)?.map(|v| v as u32),
+        kind: r.get(9)?,
     })
 }
 
@@ -380,6 +383,7 @@ mod tests {
             language: "ru".into(),
             scanlator: None,
             page_count: Some(20),
+            kind: "chapter".into(),
         }
     }
 

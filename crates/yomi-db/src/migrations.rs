@@ -13,7 +13,7 @@ use crate::{Error, Result};
 use rusqlite::Connection;
 
 /// Версия схемы, которую понимает эта сборка.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Одна миграция: SQL, поднимающий схему с `version - 1` до `version`.
 struct Migration {
@@ -21,9 +21,10 @@ struct Migration {
     sql: &'static str,
 }
 
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    sql: r#"
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        sql: r#"
 -- Тайтл. Для локальных файлов source = 'local', а external_id — путь
 -- к каталогу тайтла: он и служит естественным ключом при пересканировании.
 CREATE TABLE manga (
@@ -68,7 +69,16 @@ CREATE TABLE progress (
 
 CREATE INDEX idx_progress_updated ON progress(updated_at DESC);
 "#,
-}];
+    },
+    Migration {
+        version: 2,
+        // Тип файла: глава, том или одиночное изображение. Существующие
+        // записи получают 'unknown' — пересканирование их обновит.
+        sql: r#"
+ALTER TABLE chapters ADD COLUMN kind TEXT NOT NULL DEFAULT 'unknown';
+"#,
+    },
+];
 
 /// Приводит базу к актуальной версии схемы.
 pub fn migrate(conn: &mut Connection) -> Result<u32> {
@@ -135,6 +145,29 @@ mod tests {
             migrate(&mut conn),
             Err(Error::SchemaTooNew { found: 999, .. })
         ));
+    }
+
+    #[test]
+    fn migration_two_adds_kind_column_to_existing_database() {
+        // Поднимаем базу до первой версии, как будто она осталась от
+        // прошлой сборки, и проверяем, что обновление её не сломает.
+        let mut conn = memory();
+        conn.execute_batch(MIGRATIONS[0].sql).unwrap();
+        conn.execute_batch("PRAGMA user_version = 1;").unwrap();
+        conn.execute_batch(
+            "INSERT INTO manga (id, source, external_id, title, added_at)
+                 VALUES (1, 'local', '/x', 'Тайтл', '2026-01-01T00:00:00Z');
+             INSERT INTO chapters (id, manga_id, external_id) VALUES (1, 1, '/x/1.cbz');",
+        )
+        .unwrap();
+
+        assert_eq!(migrate(&mut conn).unwrap(), SCHEMA_VERSION);
+
+        // Данные на месте, а у старой записи появилось значение по умолчанию.
+        let kind: String = conn
+            .query_row("SELECT kind FROM chapters WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kind, "unknown");
     }
 
     #[test]
