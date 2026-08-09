@@ -278,6 +278,44 @@ impl Store {
         Ok(found)
     }
 
+    /// Все главы библиотеки — для проверки, что файлы ещё на месте.
+    pub fn all_chapters(&self) -> Result<Vec<LibraryChapter>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, manga_id, external_id, number, volume, title, language,
+                    scanlator, page_count
+             FROM chapters ORDER BY manga_id, volume, number",
+        )?;
+        let rows = stmt.query_map([], row_to_chapter)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Удаляет главы по идентификаторам. Прогресс уходит вместе с ними
+    /// каскадом — это верно только когда файла действительно больше нет.
+    pub fn delete_chapters(&mut self, ids: &[i64]) -> Result<usize> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let tx = self.conn.transaction()?;
+        let mut removed = 0usize;
+        {
+            let mut stmt = tx.prepare("DELETE FROM chapters WHERE id = ?1")?;
+            for id in ids {
+                removed += stmt.execute(params![id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(removed)
+    }
+
+    /// Убирает тайтлы, у которых не осталось ни одной главы.
+    pub fn delete_empty_manga(&mut self) -> Result<usize> {
+        Ok(self.conn.execute(
+            "DELETE FROM manga
+             WHERE id NOT IN (SELECT DISTINCT manga_id FROM chapters)",
+            [],
+        )?)
+    }
+
     pub fn manga_count(&self) -> Result<i64> {
         Ok(self
             .conn
@@ -493,6 +531,68 @@ mod tests {
         assert_eq!(s.list_manga(None).unwrap().len(), 2);
         assert_eq!(s.list_manga(Some("Друг")).unwrap().len(), 1);
         assert_eq!(s.list_manga(Some("нет такого")).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn deleting_chapters_removes_them_and_their_progress() {
+        let mut s = Store::open_in_memory().unwrap();
+        let (manga_id, _) = s
+            .upsert_scanned(&scanned(vec![
+                chapter("/манга/Тайтл/1.cbz", 1.0),
+                chapter("/манга/Тайтл/2.cbz", 2.0),
+            ]))
+            .unwrap();
+        let chapters = s.chapters_of(manga_id).unwrap();
+        s.save_progress(chapters[0].id, 3, Some(20)).unwrap();
+
+        assert_eq!(s.delete_chapters(&[chapters[0].id]).unwrap(), 1);
+        assert_eq!(s.chapter_count().unwrap(), 1);
+        assert!(s.progress_of(chapters[0].id).unwrap().is_none());
+        // Второй главы это касаться не должно.
+        assert!(s
+            .chapters_of(manga_id)
+            .unwrap()
+            .iter()
+            .any(|c| c.id == chapters[1].id));
+    }
+
+    #[test]
+    fn deleting_nothing_is_allowed() {
+        let mut s = Store::open_in_memory().unwrap();
+        assert_eq!(s.delete_chapters(&[]).unwrap(), 0);
+    }
+
+    #[test]
+    fn empty_manga_is_removed_only_after_all_chapters_are_gone() {
+        let mut s = Store::open_in_memory().unwrap();
+        let (manga_id, _) = s
+            .upsert_scanned(&scanned(vec![
+                chapter("/манга/Тайтл/1.cbz", 1.0),
+                chapter("/манга/Тайтл/2.cbz", 2.0),
+            ]))
+            .unwrap();
+        let chapters = s.chapters_of(manga_id).unwrap();
+
+        s.delete_chapters(&[chapters[0].id]).unwrap();
+        assert_eq!(s.delete_empty_manga().unwrap(), 0, "одна глава осталась");
+        assert_eq!(s.manga_count().unwrap(), 1);
+
+        s.delete_chapters(&[chapters[1].id]).unwrap();
+        assert_eq!(s.delete_empty_manga().unwrap(), 1);
+        assert_eq!(s.manga_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn all_chapters_returns_everything_across_titles() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.upsert_scanned(&scanned(vec![chapter("/манга/Тайтл/1.cbz", 1.0)]))
+            .unwrap();
+        let mut other = scanned(vec![chapter("/манга/Другой/1.cbz", 1.0)]);
+        other.external_id = "/манга/Другой".into();
+        other.title = "Другой".into();
+        s.upsert_scanned(&other).unwrap();
+
+        assert_eq!(s.all_chapters().unwrap().len(), 2);
     }
 
     #[test]

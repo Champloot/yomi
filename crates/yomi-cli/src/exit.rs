@@ -28,13 +28,31 @@ impl From<Code> for ExitCode {
 }
 
 impl Code {
-    /// Сопоставляет ошибку ядра с кодом возврата.
+    /// Сопоставляет ошибку с кодом возврата.
+    ///
+    /// Проверяются все типы ошибок, которые могут всплыть наружу: у
+    /// каждого крейта своё перечисление, и забыть один из них означает
+    /// молча вернуть общий код 1 вместо осмысленного.
     pub fn from_error(err: &anyhow::Error) -> Self {
-        use yomi_core::Error as E;
-        match err.downcast_ref::<E>() {
-            Some(E::NotFound(_)) | Some(E::SourceNotFound(_)) => Code::NotFound,
-            Some(E::ConfigParse { .. }) => Code::Usage,
-            Some(E::NotImplemented(_)) => Code::NotImplemented,
+        use yomi_core::Error as Core;
+        match err.downcast_ref::<Core>() {
+            Some(Core::NotFound(_)) | Some(Core::SourceNotFound(_)) => return Code::NotFound,
+            Some(Core::ConfigParse { .. }) => return Code::Usage,
+            Some(Core::NotImplemented(_)) => return Code::NotImplemented,
+            _ => {}
+        }
+
+        use yomi_db::Error as Db;
+        match err.downcast_ref::<Db>() {
+            Some(Db::NotFound(_)) => return Code::NotFound,
+            Some(Db::SchemaTooNew { .. }) => return Code::Usage,
+            _ => {}
+        }
+
+        use yomi_viewer::Error as Viewer;
+        match err.downcast_ref::<Viewer>() {
+            Some(Viewer::UnsupportedFormat(_)) | Some(Viewer::NoPages(_)) => Code::Usage,
+            Some(Viewer::PageOutOfRange(_)) => Code::NotFound,
             _ => Code::Failure,
         }
     }
@@ -48,6 +66,18 @@ mod tests {
     fn not_found_maps_to_four() {
         let err = anyhow::Error::new(yomi_core::Error::NotFound("x".into()));
         assert_eq!(Code::from_error(&err), Code::NotFound);
+    }
+
+    #[test]
+    fn database_not_found_maps_to_four() {
+        let err = anyhow::Error::new(yomi_db::Error::NotFound("тайтл 999".into()));
+        assert_eq!(Code::from_error(&err), Code::NotFound);
+    }
+
+    #[test]
+    fn unsupported_format_is_a_usage_error() {
+        let err = anyhow::Error::new(yomi_viewer::Error::UnsupportedFormat("/x.txt".into()));
+        assert_eq!(Code::from_error(&err), Code::Usage);
     }
 
     #[test]

@@ -49,6 +49,8 @@ yomi read обложка.png                  # одиночная картин�
 yomi library scan ~/Манга    # собрать библиотеку
 yomi library list            # что есть и сколько прочитано
 yomi library resume          # где остановились
+yomi library chapters 1      # главы тайтла (номер — из library list)
+yomi library clean           # проверить, не пропали ли файлы
 ```
 
 Ожидаемая раскладка:

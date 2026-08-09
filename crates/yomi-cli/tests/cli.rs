@@ -260,3 +260,100 @@ fn reading_page_zero_is_rejected_before_touching_the_terminal() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("с единицы"), "{stderr}");
 }
+
+#[test]
+fn clean_without_confirmation_changes_nothing() {
+    let dir = temp_dir("cleandry");
+    let manga_dir = dir.join("манга").join("Тайтл");
+    std::fs::create_dir_all(&manga_dir).unwrap();
+    let cbz = manga_dir.join("Том 1.cbz");
+    make_cbz(&cbz, 2);
+    run(
+        &dir,
+        &["library", "scan", dir.join("манга").to_str().unwrap()],
+    );
+
+    std::fs::remove_file(&cbz).unwrap();
+
+    let out = run(&dir, &["library", "clean"]);
+    assert_eq!(code(&out), 0);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("пропал"),
+        "должен показать пропажу: {stdout}"
+    );
+    assert!(
+        stdout.contains("--yes"),
+        "должен подсказать, как подтвердить"
+    );
+
+    // Запись обязана остаться: без подтверждения ничего не удаляем.
+    let listed = run(&dir, &["library", "list"]);
+    assert!(String::from_utf8_lossy(&listed.stdout).contains("Тайтл"));
+}
+
+#[test]
+fn clean_with_confirmation_removes_missing_entries() {
+    let dir = temp_dir("cleanyes");
+    let manga_dir = dir.join("манга").join("Тайтл");
+    std::fs::create_dir_all(&manga_dir).unwrap();
+    let cbz = manga_dir.join("Том 1.cbz");
+    make_cbz(&cbz, 2);
+    run(
+        &dir,
+        &["library", "scan", dir.join("манга").to_str().unwrap()],
+    );
+
+    std::fs::remove_file(&cbz).unwrap();
+    let out = run(&dir, &["library", "clean", "--yes"]);
+    assert_eq!(code(&out), 0);
+
+    // Тайтл без глав тоже уходит.
+    let listed = run(&dir, &["library", "list"]);
+    assert!(
+        String::from_utf8_lossy(&listed.stdout).contains("пуста"),
+        "библиотека должна опустеть"
+    );
+}
+
+#[test]
+fn clean_on_intact_library_reports_nothing_to_do() {
+    let dir = temp_dir("cleanintact");
+    let manga_dir = dir.join("манга").join("Тайтл");
+    std::fs::create_dir_all(&manga_dir).unwrap();
+    make_cbz(&manga_dir.join("Том 1.cbz"), 2);
+    run(
+        &dir,
+        &["library", "scan", dir.join("манга").to_str().unwrap()],
+    );
+
+    let out = run(&dir, &["library", "clean"]);
+    assert_eq!(code(&out), 0);
+    assert!(String::from_utf8_lossy(&out.stdout).contains("на месте"));
+}
+
+#[test]
+fn chapters_lists_chapters_of_a_title() {
+    let dir = temp_dir("chapters");
+    let manga_dir = dir.join("манга").join("Тайтл");
+    std::fs::create_dir_all(&manga_dir).unwrap();
+    make_cbz(&manga_dir.join("Том 1.cbz"), 2);
+    make_cbz(&manga_dir.join("Том 2.cbz"), 3);
+    run(
+        &dir,
+        &["library", "scan", dir.join("манга").to_str().unwrap()],
+    );
+
+    let out = run(&dir, &["library", "chapters", "1"]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("т.1") && stdout.contains("т.2"), "{stdout}");
+}
+
+#[test]
+fn chapters_of_unknown_title_is_not_found() {
+    let dir = temp_dir("chaptersmissing");
+    run(&dir, &["library", "list"]);
+    let out = run(&dir, &["library", "chapters", "999"]);
+    assert_eq!(code(&out), 4, "несуществующий тайтл — код «не найдено»");
+}

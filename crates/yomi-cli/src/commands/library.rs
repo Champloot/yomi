@@ -11,6 +11,8 @@ pub async fn run(ctx: &Ctx, cmd: &LibraryCommand) -> Result<()> {
         LibraryCommand::Scan { paths } => scan(ctx, paths),
         LibraryCommand::List { filter } => list(filter.as_deref()),
         LibraryCommand::Resume => resume(),
+        LibraryCommand::Chapters { manga_id } => chapters(*manga_id),
+        LibraryCommand::Clean { yes } => clean(*yes),
     }
 }
 
@@ -169,5 +171,72 @@ fn resume() -> Result<()> {
     );
     println!();
     println!("yomi read '{}'", chapter.external_id);
+    Ok(())
+}
+
+/// `yomi library chapters ID` — главы тайтла с отметками о прочтении.
+fn chapters(manga_id: i64) -> Result<()> {
+    let store = open_store()?;
+    let manga = store.manga_by_id(manga_id)?;
+    let chapters = store.chapters_of(manga_id)?;
+
+    if chapters.is_empty() {
+        println!("{}: глав нет", manga.title);
+        return Ok(());
+    }
+
+    println!("{}\n", manga.title);
+    for chapter in &chapters {
+        let mark = match store.progress_of(chapter.id)? {
+            Some(p) if p.completed => "✓".to_string(),
+            Some(p) => format!("{}", p.page + 1),
+            None => "·".to_string(),
+        };
+        println!("{mark:>4}  {:<32} {}", chapter.label(), chapter.external_id);
+    }
+    println!("\nОткрыть: yomi read ПУТЬ");
+    Ok(())
+}
+
+/// `yomi library clean` — убрать записи о пропавших файлах.
+///
+/// По умолчанию только показывает, что будет удалено. Причина серьёзная:
+/// если коллекция лежит на съёмном диске или сетевой шаре, а та не
+/// примонтирована, «пропавшими» окажутся все файлы разом — и молчаливая
+/// уборка унесла бы вместе с ними весь прогресс чтения.
+fn clean(confirmed: bool) -> Result<()> {
+    let mut store = open_store()?;
+
+    let missing: Vec<_> = store
+        .all_chapters()?
+        .into_iter()
+        .filter(|c| !c.path().exists())
+        .collect();
+
+    if missing.is_empty() {
+        println!("Все файлы на месте, чистить нечего.");
+        return Ok(());
+    }
+
+    for chapter in &missing {
+        println!("пропал: {}", chapter.external_id);
+    }
+
+    if !confirmed {
+        println!(
+            "\nНайдено записей о пропавших файлах: {}.\n\
+             Проверьте, что диск с коллекцией подключён — если файлы \n\
+             просто недоступны, удалять их из библиотеки не нужно: \n\
+             вместе с ними пропадёт и прогресс чтения.\n\n\
+             Удалить: yomi library clean --yes",
+            missing.len()
+        );
+        return Ok(());
+    }
+
+    let ids: Vec<i64> = missing.iter().map(|c| c.id).collect();
+    let removed = store.delete_chapters(&ids)?;
+    let titles = store.delete_empty_manga()?;
+    println!("\nУдалено глав: {removed}, опустевших тайтлов: {titles}");
     Ok(())
 }
