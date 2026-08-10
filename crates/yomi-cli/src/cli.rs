@@ -12,7 +12,8 @@ use std::path::PathBuf;
     name = "yomi",
     version,
     about = "Терминальная читалка манги",
-    long_about = "yomi — чтение, поиск и загрузка манги прямо из терминала.\n\
+    long_about = "yomi — чтение манги прямо из терминала.\n\
+                  Локальные файлы, библиотека с прогрессом, сборка CBZ.\n\
                   Документация: docs/ в репозитории проекта.",
     propagate_version = true
 )]
@@ -51,23 +52,12 @@ pub enum Command {
     /// Что внутри файла: том или глава, сколько страниц, есть ли разбиение
     Info(InfoArgs),
 
+    /// Собрать CBZ из каталога с картинками
+    Pack(PackArgs),
+
     /// Локальная библиотека
     #[command(subcommand)]
     Library(LibraryCommand),
-
-    /// Искать в источниках
-    Search(SearchArgs),
-
-    /// Скачать главы
-    Download(DownloadArgs),
-
-    /// Подробности о тайтле в источнике: сколько глав и сколько из них
-    /// реально доступно для скачивания
-    Manga(MangaArgs),
-
-    /// Источники манги
-    #[command(subcommand)]
-    Sources(SourcesCommand),
 
     /// Конфигурация
     #[command(subcommand)]
@@ -99,6 +89,37 @@ pub struct ReadArgs {
     /// Направление чтения
     #[arg(long, value_enum)]
     pub direction: Option<DirectionArg>,
+}
+
+#[derive(Debug, Args)]
+pub struct PackArgs {
+    /// Каталог с изображениями (страницы в естественном порядке имён)
+    #[arg(value_name = "КАТАЛОГ")]
+    pub path: PathBuf,
+
+    /// Куда сохранить архив. По умолчанию — рядом, по имени каталога
+    #[arg(long, short = 'o', value_name = "ФАЙЛ")]
+    pub output: Option<PathBuf>,
+
+    /// Название тайтла для метаданных. По умолчанию — имя каталога
+    #[arg(long)]
+    pub series: Option<String>,
+
+    /// Номер тома
+    #[arg(long)]
+    pub volume: Option<u16>,
+
+    /// Номер главы
+    #[arg(long)]
+    pub chapter: Option<f32>,
+
+    /// Название главы
+    #[arg(long)]
+    pub title: Option<String>,
+
+    /// Перезаписать существующий архив
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Debug, Args)]
@@ -141,77 +162,6 @@ pub enum LibraryCommand {
         #[arg(long, short = 'f')]
         filter: Option<String>,
     },
-}
-
-#[derive(Debug, Args)]
-pub struct SearchArgs {
-    /// Поисковый запрос
-    #[arg(value_name = "ЗАПРОС")]
-    pub query: Option<String>,
-
-    /// Идентификатор источника
-    #[arg(long, short = 's', default_value = "mangadex")]
-    pub source: String,
-
-    /// Жанр; можно повторять
-    #[arg(long, short = 'g', value_name = "ЖАНР")]
-    pub genre: Vec<String>,
-
-    /// Исключить жанр; можно повторять
-    #[arg(long, value_name = "ЖАНР")]
-    pub exclude_genre: Vec<String>,
-
-    /// Автор
-    #[arg(long, short = 'a')]
-    pub author: Vec<String>,
-
-    /// Способ сортировки
-    #[arg(long, value_enum, default_value_t = SortArg::Relevance)]
-    pub sort: SortArg,
-
-    /// Номер страницы результатов
-    #[arg(long, default_value_t = 1)]
-    pub page: u32,
-
-    /// Результатов на страницу
-    #[arg(long, default_value_t = 20)]
-    pub limit: u32,
-}
-
-#[derive(Debug, Args)]
-pub struct DownloadArgs {
-    /// Идентификатор тайтла в источнике
-    #[arg(value_name = "ID")]
-    pub manga_id: String,
-
-    #[arg(long, short = 's', default_value = "mangadex")]
-    pub source: String,
-
-    /// Главы: "5", "1-10", "all"
-    ///
-    /// Короткого -c здесь нет: он занят глобальным --config.
-    #[arg(long, default_value = "all")]
-    pub chapters: String,
-
-    /// Каталог назначения
-    #[arg(long, short = 'o', value_name = "КАТАЛОГ")]
-    pub output: Option<PathBuf>,
-}
-
-#[derive(Debug, Args)]
-pub struct MangaArgs {
-    /// Идентификатор тайтла в источнике
-    #[arg(value_name = "ID")]
-    pub manga_id: String,
-
-    #[arg(long, short = 's', default_value = "mangadex")]
-    pub source: String,
-}
-
-#[derive(Debug, Subcommand)]
-pub enum SourcesCommand {
-    /// Список доступных источников и их возможностей
-    List,
 }
 
 #[derive(Debug, Subcommand)]
@@ -278,30 +228,6 @@ impl From<FitArg> for yomi_core::config::Fit {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum SortArg {
-    Relevance,
-    Popularity,
-    Rating,
-    Updated,
-    Created,
-    Title,
-}
-
-impl From<SortArg> for yomi_core::model::SortBy {
-    fn from(s: SortArg) -> Self {
-        use yomi_core::model::SortBy;
-        match s {
-            SortArg::Relevance => SortBy::Relevance,
-            SortArg::Popularity => SortBy::Popularity,
-            SortArg::Rating => SortBy::Rating,
-            SortArg::Updated => SortBy::Updated,
-            SortArg::Created => SortBy::Created,
-            SortArg::Title => SortBy::Title,
-        }
-    }
-}
-
 impl From<RendererArg> for yomi_core::config::Renderer {
     fn from(r: RendererArg) -> Self {
         use yomi_core::config::Renderer;
@@ -340,16 +266,6 @@ mod tests {
     }
 
     #[test]
-    fn repeated_genre_flags_accumulate() {
-        let cli =
-            Cli::try_parse_from(["yomi", "search", "тест", "-g", "драма", "-g", "школа"]).unwrap();
-        match cli.command {
-            Command::Search(a) => assert_eq!(a.genre, vec!["драма", "школа"]),
-            _ => panic!("ожидалась команда search"),
-        }
-    }
-
-    #[test]
     fn read_accepts_fit_and_upscale() {
         let cli =
             Cli::try_parse_from(["yomi", "read", "a.cbz", "--fit", "width", "--upscale"]).unwrap();
@@ -373,13 +289,13 @@ mod tests {
 
     #[test]
     fn verbose_flag_counts() {
-        let cli = Cli::try_parse_from(["yomi", "-vv", "sources", "list"]).unwrap();
+        let cli = Cli::try_parse_from(["yomi", "-vv", "info", "a.cbz"]).unwrap();
         assert_eq!(cli.verbose, 2);
     }
 
     #[test]
     fn quiet_and_verbose_are_mutually_exclusive() {
-        assert!(Cli::try_parse_from(["yomi", "-q", "-v", "sources", "list"]).is_err());
+        assert!(Cli::try_parse_from(["yomi", "-q", "-v", "info", "a.cbz"]).is_err());
     }
 
     #[test]

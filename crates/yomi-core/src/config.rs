@@ -17,8 +17,6 @@ pub struct Config {
     pub general: General,
     pub library: Library,
     pub reader: Reader,
-    pub download: Download,
-    pub network: Network,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -119,48 +117,6 @@ impl Default for Reader {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub struct Download {
-    /// Куда складывать скачанное. Пусто — каталог данных XDG.
-    pub directory: Option<PathBuf>,
-    /// Шаблон имени файла главы.
-    pub filename_template: String,
-    /// Одновременных загрузок страниц.
-    pub concurrency: u8,
-}
-
-impl Default for Download {
-    fn default() -> Self {
-        Self {
-            directory: None,
-            filename_template: "{manga}/{volume}-{chapter} {title}.cbz".into(),
-            concurrency: 4,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub struct Network {
-    pub timeout_secs: u16,
-    pub retries: u8,
-    pub user_agent: String,
-    /// Прокси вида `socks5://127.0.0.1:9050`. Актуально для части источников.
-    pub proxy: Option<String>,
-}
-
-impl Default for Network {
-    fn default() -> Self {
-        Self {
-            timeout_secs: 30,
-            retries: 3,
-            user_agent: format!("yomi/{}", crate::VERSION),
-            proxy: None,
-        }
-    }
-}
-
 impl Config {
     /// Читает конфигурацию. Если файла нет — возвращает значения по умолчанию.
     pub fn load(explicit_path: Option<&Path>) -> Result<Self> {
@@ -202,14 +158,6 @@ impl Config {
         }
         std::fs::write(path, self.to_toml())?;
         Ok(true)
-    }
-
-    /// Каталог загрузок с учётом значения по умолчанию.
-    pub fn download_dir(&self) -> Result<PathBuf> {
-        match &self.download.directory {
-            Some(p) => Ok(p.clone()),
-            None => Ok(paths::data_dir()?.join("downloads")),
-        }
     }
 }
 

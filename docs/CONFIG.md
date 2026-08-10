@@ -89,31 +89,6 @@ preload_pages = 2            # сколько страниц готовить з
 означает следующую страницу. Текущее направление показано в строке
 состояния, чтобы не приходилось гадать.
 
-### `[download]`
-
-```toml
-[download]
-# directory = "/home/user/Манга"     # по умолчанию — каталог данных XDG
-filename_template = "{manga}/{volume}-{chapter} {title}.cbz"
-concurrency = 4                      # одновременных загрузок страниц
-```
-
-Подстановки в шаблоне: `{manga}`, `{volume}`, `{chapter}`, `{title}`,
-`{scanlator}`, `{language}`.
-
-Не задирайте `concurrency`: источники ограничивают частоту запросов,
-и агрессивный клиент получит бан по адресу.
-
-### `[network]`
-
-```toml
-[network]
-timeout_secs = 30
-retries = 3
-user_agent = "yomi/0.1.0"
-# proxy = "socks5://127.0.0.1:9050"
-```
-
 ## Приоритет значений
 
 Позднее переопределяет раннее:

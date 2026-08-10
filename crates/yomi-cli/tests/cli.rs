@@ -64,7 +64,7 @@ fn help_is_available() {
     let out = run(&dir, &["--help"]);
     assert_eq!(code(&out), 0);
     let text = stdout(&out);
-    for cmd in ["read", "search", "download", "library", "sources", "config"] {
+    for cmd in ["read", "info", "pack", "library", "config"] {
         assert!(text.contains(cmd), "в справке нет команды {cmd}");
     }
 }
@@ -78,33 +78,6 @@ fn without_command_exits_with_usage_error() {
         2,
         "clap возвращает 2 при неверном использовании"
     );
-}
-
-#[test]
-fn sources_list_shows_demo_source() {
-    let dir = temp_dir("sources");
-    let out = run(&dir, &["sources", "list"]);
-    assert_eq!(code(&out), 0);
-    assert!(stdout(&out).contains("demo"));
-}
-
-#[test]
-fn search_finds_demo_entry() {
-    let dir = temp_dir("search");
-    // Источник указан явно: по умолчанию поиск идёт в MangaDex,
-    // а тесты не должны зависеть от доступности сети.
-    let out = run(&dir, &["search", "Пример", "-s", "demo"]);
-    assert_eq!(code(&out), 0);
-    let text = stdout(&out);
-    assert!(text.contains("Пример первый"));
-    assert!(text.contains("Найдено: 2"));
-}
-
-#[test]
-fn search_in_unknown_source_exits_not_found() {
-    let dir = temp_dir("badsource");
-    let out = run(&dir, &["search", "x", "--source", "не-существует"]);
-    assert_eq!(code(&out), 4);
 }
 
 #[test]
@@ -152,6 +125,15 @@ fn broken_config_exits_with_usage_code() {
     assert_eq!(code(&out), 2, "битый конфиг — ошибка использования");
 }
 
+/// Минимальный валидный PNG для тестов.
+fn png_bytes() -> Vec<u8> {
+    let img = image::DynamicImage::ImageRgb8(image::RgbImage::new(4, 4));
+    let mut buf = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+        .unwrap();
+    buf
+}
+
 /// Собирает валидный CBZ из нескольких PNG — нужен тестам библиотеки,
 /// потому что сканер отсеивает архивы без картинок.
 fn make_cbz(path: &Path, pages: usize) {
@@ -169,32 +151,6 @@ fn make_cbz(path: &Path, pages: usize) {
         zip.write_all(&png).unwrap();
     }
     zip.finish().unwrap();
-}
-
-#[test]
-fn download_from_a_source_without_page_fetching_fails_clearly() {
-    // Демо-источник умеет отдавать список страниц, но не скачивать их.
-    // Такой отказ должен быть внятным, а не паникой.
-    let dir = temp_dir("dlunsupported");
-    let out = run(
-        &dir,
-        &["download", "1", "-s", "demo", "-o", dir.to_str().unwrap()],
-    );
-    assert_ne!(code(&out), 0);
-    let combined = format!("{}{}", stdout(&out), String::from_utf8_lossy(&out.stderr));
-    assert!(
-        !combined.contains("panicked"),
-        "не должно быть паники: {combined}"
-    );
-}
-
-#[test]
-fn download_with_unknown_chapter_selector_explains_itself() {
-    let dir = temp_dir("dlselector");
-    let out = run(&dir, &["download", "1", "-s", "demo", "--chapters", "абв"]);
-    assert_ne!(code(&out), 0);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("не подошла ни одна глава"), "{stderr}");
 }
 
 #[test]
@@ -378,8 +334,57 @@ fn chapters_of_unknown_title_is_not_found() {
 }
 
 #[test]
-fn manga_command_requires_a_working_source() {
-    let dir = temp_dir("mangabadsource");
-    let out = run(&dir, &["manga", "any-id", "-s", "no-such-source"]);
-    assert_eq!(code(&out), 4);
+fn pack_builds_an_archive_from_a_directory() {
+    let dir = temp_dir("packdir");
+    let pages = dir.join("Глава 1");
+    std::fs::create_dir_all(&pages).unwrap();
+    for name in ["page1.png", "page2.png", "page10.png"] {
+        std::fs::write(pages.join(name), png_bytes()).unwrap();
+    }
+
+    let out = run(&dir, &["pack", pages.to_str().unwrap()]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+
+    let archive = dir.join("Глава 1.cbz");
+    assert!(archive.exists(), "архив должен появиться рядом с каталогом");
+
+    // Порядок страниц должен быть естественным, а не лексикографическим.
+    let file = std::fs::File::open(&archive).unwrap();
+    let mut zip = zip::ZipArchive::new(file).unwrap();
+    let names: Vec<String> = (0..zip.len())
+        .map(|i| zip.by_index(i).unwrap().name().to_string())
+        .collect();
+    assert_eq!(names[0], "001.png");
+    assert_eq!(names[2], "003.png");
+    assert!(names.contains(&"ComicInfo.xml".to_string()));
+}
+
+#[test]
+fn pack_refuses_to_overwrite_without_force() {
+    let dir = temp_dir("packoverwrite");
+    let pages = dir.join("тайтл");
+    std::fs::create_dir_all(&pages).unwrap();
+    std::fs::write(pages.join("001.png"), png_bytes()).unwrap();
+
+    assert_eq!(code(&run(&dir, &["pack", pages.to_str().unwrap()])), 0);
+    let second = run(&dir, &["pack", pages.to_str().unwrap()]);
+    assert_ne!(
+        code(&second),
+        0,
+        "повторная упаковка не должна затирать молча"
+    );
+    assert!(String::from_utf8_lossy(&second.stderr).contains("--force"));
+
+    assert_eq!(
+        code(&run(&dir, &["pack", pages.to_str().unwrap(), "--force"])),
+        0
+    );
+}
+
+#[test]
+fn pack_needs_a_directory_not_a_file() {
+    let dir = temp_dir("packfile");
+    let file = dir.join("одна.png");
+    std::fs::write(&file, png_bytes()).unwrap();
+    assert_ne!(code(&run(&dir, &["pack", file.to_str().unwrap()])), 0);
 }

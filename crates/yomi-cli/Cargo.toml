@@ -21,7 +21,6 @@ path = "src/main.rs"
 yomi-core = { path = "../yomi-core" }
 yomi-viewer = { path = "../yomi-viewer" }
 yomi-db = { path = "../yomi-db" }
-yomi-source-mangadex = { path = "../yomi-source-mangadex" }
 yomi-download = { path = "../yomi-download" }
 anyhow.workspace = true
 clap.workspace = true
