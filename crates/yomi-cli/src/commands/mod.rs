@@ -24,9 +24,10 @@ pub struct Ctx {
 
 pub async fn dispatch(cli: &Cli) -> Result<()> {
     let config = yomi_core::config::Config::load(cli.config.as_deref())?;
+    let registry = build_registry(&config);
     let ctx = Ctx {
         config,
-        registry: yomi_core::source::default_registry(),
+        registry,
         json: cli.json,
     };
 
@@ -41,12 +42,25 @@ pub async fn dispatch(cli: &Cli) -> Result<()> {
     }
 }
 
-/// Заглушка для нереализованных возможностей.
+/// Собирает реестр источников.
 ///
-/// Возвращает ошибку с кодом 6, а не молча ничего не делает: скрипты
-/// должны отличать «не умею» от «сделал».
-pub fn not_implemented(what: &'static str, milestone: &str) -> anyhow::Error {
-    anyhow::Error::new(yomi_core::Error::NotImplemented(what)).context(format!(
-        "запланировано на этап {milestone}, см. docs/ROADMAP.md"
-    ))
+/// Сетевые источники регистрируются здесь, а не в ядре: ядро не должно
+/// зависеть от HTTP-клиента. Сбой создания источника не роняет
+/// программу — остальные источники и локальное чтение продолжат
+/// работать без него.
+fn build_registry(config: &yomi_core::config::Config) -> yomi_core::source::Registry {
+    let registry = yomi_core::source::default_registry();
+
+    let timeout = std::time::Duration::from_secs(config.network.timeout_secs as u64);
+    match yomi_source_mangadex::MangaDexSource::new(
+        &config.network.user_agent,
+        timeout,
+        config.general.content_languages.clone(),
+    ) {
+        Ok(source) => registry.register(std::sync::Arc::new(source)),
+        Err(e) => {
+            tracing::warn!(error = %e, "источник MangaDex недоступен");
+            registry
+        }
+    }
 }

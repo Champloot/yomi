@@ -91,7 +91,9 @@ fn sources_list_shows_demo_source() {
 #[test]
 fn search_finds_demo_entry() {
     let dir = temp_dir("search");
-    let out = run(&dir, &["search", "Пример"]);
+    // Источник указан явно: по умолчанию поиск идёт в MangaDex,
+    // а тесты не должны зависеть от доступности сети.
+    let out = run(&dir, &["search", "Пример", "-s", "demo"]);
     assert_eq!(code(&out), 0);
     let text = stdout(&out);
     assert!(text.contains("Пример первый"));
@@ -170,12 +172,29 @@ fn make_cbz(path: &Path, pages: usize) {
 }
 
 #[test]
-fn unimplemented_command_exits_with_six() {
-    let dir = temp_dir("notimpl");
-    // `library` реализована с M2, поэтому проверяем то, что ещё нет:
-    // загрузка глав появится на M3.
-    let out = run(&dir, &["download", "1"]);
-    assert_eq!(code(&out), 6);
+fn download_from_a_source_without_page_fetching_fails_clearly() {
+    // Демо-источник умеет отдавать список страниц, но не скачивать их.
+    // Такой отказ должен быть внятным, а не паникой.
+    let dir = temp_dir("dlunsupported");
+    let out = run(
+        &dir,
+        &["download", "1", "-s", "demo", "-o", dir.to_str().unwrap()],
+    );
+    assert_ne!(code(&out), 0);
+    let combined = format!("{}{}", stdout(&out), String::from_utf8_lossy(&out.stderr));
+    assert!(
+        !combined.contains("panicked"),
+        "не должно быть паники: {combined}"
+    );
+}
+
+#[test]
+fn download_with_unknown_chapter_selector_explains_itself() {
+    let dir = temp_dir("dlselector");
+    let out = run(&dir, &["download", "1", "-s", "demo", "--chapters", "абв"]);
+    assert_ne!(code(&out), 0);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("не подошла ни одна глава"), "{stderr}");
 }
 
 #[test]

@@ -1,0 +1,59 @@
+{
+  "result": "ok",
+  "response": "collection",
+  "data": [
+    {
+      "id": "aa6c76f7-5f5f-46b6-a800-911145f81b9b",
+      "type": "manga",
+      "attributes": {
+        "title": { "en": "Example Title", "ru": "Пример названия" },
+        "altTitles": [ { "ja": "サンプル" }, { "ru": "Другое название" } ],
+        "description": {
+          "en": "An example description.",
+          "ru": "Пример описания."
+        },
+        "originalLanguage": "ja",
+        "status": "ongoing",
+        "year": 2019,
+        "contentRating": "safe",
+        "tags": [
+          {
+            "id": "tag-1",
+            "type": "tag",
+            "attributes": {
+              "name": { "en": "Psychological", "ru": "Психологическое" },
+              "group": "genre"
+            }
+          },
+          {
+            "id": "tag-2",
+            "type": "tag",
+            "attributes": { "name": { "en": "Drama" }, "group": "genre" }
+          }
+        ],
+        "someFutureFieldWeDoNotKnow": 42
+      },
+      "relationships": [
+        { "id": "author-1", "type": "author", "attributes": { "name": "Автор А." } },
+        { "id": "artist-1", "type": "artist", "attributes": { "name": "Художник Б." } },
+        { "id": "cover-1", "type": "cover_art" }
+      ]
+    },
+    {
+      "id": "bb7d87f8-6060-4707-b911-a22256f92cac",
+      "type": "manga",
+      "attributes": {
+        "title": { "en": "Second Example" },
+        "altTitles": [],
+        "description": {},
+        "status": "completed",
+        "year": null,
+        "tags": []
+      },
+      "relationships": []
+    }
+  ],
+  "limit": 10,
+  "offset": 0,
+  "total": 2
+}

@@ -31,6 +31,12 @@ pub enum Error {
     #[error("не найдено: {0}")]
     NotFound(String),
 
+    #[error("сеть недоступна: {0}")]
+    Network(String),
+
+    #[error("источник ответил неожиданно: {0}")]
+    BadResponse(String),
+
     #[error("возможность ещё не реализована: {0}")]
     NotImplemented(&'static str),
 }

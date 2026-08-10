@@ -146,7 +146,7 @@ pub struct SearchArgs {
     pub query: Option<String>,
 
     /// Идентификатор источника
-    #[arg(long, short = 's', default_value = "demo")]
+    #[arg(long, short = 's', default_value = "mangadex")]
     pub source: String,
 
     /// Жанр; можно повторять
@@ -180,7 +180,7 @@ pub struct DownloadArgs {
     #[arg(value_name = "ID")]
     pub manga_id: String,
 
-    #[arg(long, short = 's', default_value = "demo")]
+    #[arg(long, short = 's', default_value = "mangadex")]
     pub source: String,
 
     /// Главы: "5", "1-10", "all"

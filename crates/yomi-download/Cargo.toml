@@ -1,0 +1,21 @@
+[package]
+name = "yomi-download"
+description = "Загрузка глав и упаковка в CBZ"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+exclude = ["tests/"]
+
+[dependencies]
+yomi-core = { path = "../yomi-core" }
+thiserror.workspace = true
+tracing.workspace = true
+tokio = { workspace = true, features = ["fs", "sync"] }
+zip = { version = "0.6", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
+tempfile = "3"

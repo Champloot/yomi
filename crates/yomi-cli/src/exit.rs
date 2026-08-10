@@ -39,6 +39,8 @@ impl Code {
             Some(Core::NotFound(_)) | Some(Core::SourceNotFound(_)) => return Code::NotFound,
             Some(Core::ConfigParse { .. }) => return Code::Usage,
             Some(Core::NotImplemented(_)) => return Code::NotImplemented,
+            Some(Core::Network(_)) => return Code::Network,
+            Some(Core::BadResponse(_)) => return Code::Failure,
             _ => {}
         }
 
@@ -66,6 +68,14 @@ mod tests {
     fn not_found_maps_to_four() {
         let err = anyhow::Error::new(yomi_core::Error::NotFound("x".into()));
         assert_eq!(Code::from_error(&err), Code::NotFound);
+    }
+
+    #[test]
+    fn network_failure_maps_to_five() {
+        // Скрипт должен отличать «сервис недоступен» от «нет такого
+        // тайтла»: в первом случае имеет смысл повторить позже.
+        let err = anyhow::Error::new(yomi_core::Error::Network("таймаут".into()));
+        assert_eq!(Code::from_error(&err), Code::Network);
     }
 
     #[test]

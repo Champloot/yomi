@@ -1,0 +1,17 @@
+{
+  "result": "ok",
+  "baseUrl": "https://uploads.example.org",
+  "chapter": {
+    "hash": "3303dd03ac8d27452cce3f2a882e94b2",
+    "data": [
+      "1-aaaa.png",
+      "2-bbbb.png",
+      "3-cccc.png"
+    ],
+    "dataSaver": [
+      "1-dddd.jpg",
+      "2-eeee.jpg",
+      "3-ffff.jpg"
+    ]
+  }
+}

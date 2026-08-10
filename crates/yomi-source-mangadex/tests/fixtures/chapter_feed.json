@@ -1,0 +1,54 @@
+{
+  "result": "ok",
+  "response": "collection",
+  "data": [
+    {
+      "id": "chapter-uuid-1",
+      "type": "chapter",
+      "attributes": {
+        "volume": "1",
+        "chapter": "1",
+        "title": "Начало",
+        "translatedLanguage": "ru",
+        "pages": 24,
+        "publishAt": "2024-03-01T10:00:00+00:00"
+      },
+      "relationships": [
+        {
+          "id": "group-1",
+          "type": "scanlation_group",
+          "attributes": { "name": "Команда перевода" }
+        }
+      ]
+    },
+    {
+      "id": "chapter-uuid-2",
+      "type": "chapter",
+      "attributes": {
+        "volume": null,
+        "chapter": "10.5",
+        "title": "",
+        "translatedLanguage": "ru",
+        "pages": 8,
+        "publishAt": "2024-04-01T10:00:00+00:00"
+      },
+      "relationships": []
+    },
+    {
+      "id": "chapter-uuid-3",
+      "type": "chapter",
+      "attributes": {
+        "volume": "2",
+        "chapter": null,
+        "translatedLanguage": "en",
+        "pages": 0,
+        "externalUrl": "https://example.com/read-elsewhere",
+        "publishAt": "2024-05-01T10:00:00+00:00"
+      },
+      "relationships": []
+    }
+  ],
+  "limit": 100,
+  "offset": 0,
+  "total": 3
+}
