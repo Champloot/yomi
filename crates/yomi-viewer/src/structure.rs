@@ -145,6 +145,10 @@ pub enum SplitSource {
     Directories,
     /// Шаблон в именах файлов.
     FileNames,
+    /// Пропорции страниц: разворот в начале главы. Эвристика — в отличие
+    /// от остальных источников, это догадка по содержимому, а не
+    /// разметка, оставленная человеком.
+    PageShape,
 }
 
 impl SplitSource {
@@ -153,6 +157,7 @@ impl SplitSource {
             Self::Bookmarks => "закладки ComicInfo.xml",
             Self::Directories => "каталоги внутри архива",
             Self::FileNames => "имена файлов",
+            Self::PageShape => "пропорции страниц (эвристика)",
         }
     }
 }
@@ -162,6 +167,116 @@ impl SplitSource {
 pub struct Split {
     pub source: SplitSource,
     pub chapters: Vec<InnerChapter>,
+}
+
+/// Размеры страницы в пикселях.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PageShape {
+    pub width: u32,
+    pub height: u32,
+}
+
+impl PageShape {
+    fn aspect(&self) -> f64 {
+        if self.height == 0 {
+            return 1.0;
+        }
+        self.width as f64 / self.height as f64
+    }
+}
+
+/// Насколько шире обычной должна быть страница, чтобы счесть её разворотом.
+const WIDE_FACTOR: f64 = 1.25;
+
+/// Меньше этого числа страниц глава быть не может — такие границы
+/// считаем ложными и отбрасываем.
+const MIN_CHAPTER_PAGES: usize = 4;
+
+/// Если развороты занимают большую долю тома, значит это не признак
+/// начала главы, а особенность вёрстки: разбивать по ним нельзя.
+const MAX_WIDE_SHARE: f64 = 0.25;
+
+/// Пытается найти границы глав по пропорциям страниц.
+///
+/// В части изданий первая страница главы — разворот на два листа,
+/// отсканированный одним файлом, и потому заметно шире прочих.
+/// Функция ищет именно такие выбросы относительно медианной пропорции
+/// тома, а не абсолютную «горизонтальность»: у разных сканов разные
+/// пропорции, и сравнивать нужно с самим томом.
+///
+/// Результат помечается как эвристика: развороты встречаются и в
+/// середине глав, поэтому границы могут оказаться лишними.
+pub fn detect_by_page_shape(shapes: &[PageShape]) -> Option<Split> {
+    if shapes.len() < MIN_CHAPTER_PAGES * 2 {
+        return None;
+    }
+
+    let mut aspects: Vec<f64> = shapes.iter().map(|s| s.aspect()).collect();
+    let mut sorted = aspects.clone();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let median = sorted[sorted.len() / 2];
+    if median <= 0.0 {
+        return None;
+    }
+
+    // Кандидаты — страницы заметно шире медианной.
+    let threshold = median * WIDE_FACTOR;
+    let mut candidates: Vec<usize> = aspects
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| **a >= threshold)
+        .map(|(i, _)| i)
+        .collect();
+    aspects.clear();
+
+    if candidates.len() < 2 {
+        return None;
+    }
+    if candidates.len() as f64 / shapes.len() as f64 > MAX_WIDE_SHARE {
+        return None;
+    }
+
+    // Идущие подряд широкие страницы — один разворот, а не две границы.
+    candidates.dedup_by(|a, b| *a == *b + 1);
+
+    // Границы ближе MIN_CHAPTER_PAGES друг к другу неправдоподобны:
+    // оставляем первую из группы.
+    let mut boundaries: Vec<usize> = Vec::new();
+    for index in candidates {
+        match boundaries.last() {
+            Some(last) if index - last < MIN_CHAPTER_PAGES => continue,
+            _ => boundaries.push(index),
+        }
+    }
+    if boundaries.len() < 2 {
+        return None;
+    }
+
+    let mut chapters = Vec::new();
+
+    // Страницы до первой найденной границы — начало тома: обложка,
+    // оглавление, иногда первая глава без разворота.
+    if boundaries[0] >= MIN_CHAPTER_PAGES {
+        chapters.push(InnerChapter {
+            title: "Начало тома".to_string(),
+            start_page: 0,
+            page_count: boundaries[0] as u32,
+        });
+    }
+
+    for (i, start) in boundaries.iter().enumerate() {
+        let end = boundaries.get(i + 1).copied().unwrap_or(shapes.len());
+        chapters.push(InnerChapter {
+            title: format!("Глава {}", chapters.len() + 1),
+            start_page: *start as u32,
+            page_count: (end - start) as u32,
+        });
+    }
+
+    Some(Split {
+        source: SplitSource::PageShape,
+        chapters,
+    })
 }
 
 /// Пытается разбить том на главы по имеющейся разметке.
@@ -420,6 +535,149 @@ mod tests {
             SplitSource::Bookmarks,
             "метаданные достовернее структуры"
         );
+    }
+
+    fn tall(n: usize) -> Vec<PageShape> {
+        vec![
+            PageShape {
+                width: 1400,
+                height: 2000
+            };
+            n
+        ]
+    }
+
+    #[test]
+    fn wide_pages_mark_chapter_starts() {
+        let mut shapes = tall(40);
+        // Развороты в начале второй и третьей главы.
+        shapes[12] = PageShape {
+            width: 2800,
+            height: 2000,
+        };
+        shapes[26] = PageShape {
+            width: 2800,
+            height: 2000,
+        };
+
+        let split = detect_by_page_shape(&shapes).unwrap();
+        assert_eq!(split.source, SplitSource::PageShape);
+        // Начало тома + две главы с разворотов.
+        assert_eq!(split.chapters.len(), 3);
+        assert_eq!(split.chapters[1].start_page, 12);
+        assert_eq!(split.chapters[2].start_page, 26);
+    }
+
+    #[test]
+    fn uniform_pages_yield_no_split() {
+        assert!(detect_by_page_shape(&tall(60)).is_none());
+    }
+
+    #[test]
+    fn a_single_spread_is_not_enough_for_a_split() {
+        let mut shapes = tall(30);
+        shapes[10] = PageShape {
+            width: 2800,
+            height: 2000,
+        };
+        assert!(
+            detect_by_page_shape(&shapes).is_none(),
+            "одна граница — не разбиение"
+        );
+    }
+
+    #[test]
+    fn too_many_spreads_mean_the_signal_is_meaningless() {
+        // Каждая третья страница широкая — это особенность вёрстки,
+        // а не начало главы.
+        let mut shapes = tall(60);
+        for i in (0..60).step_by(3) {
+            shapes[i] = PageShape {
+                width: 2800,
+                height: 2000,
+            };
+        }
+        assert!(detect_by_page_shape(&shapes).is_none());
+    }
+
+    #[test]
+    fn adjacent_wide_pages_count_as_one_boundary() {
+        let mut shapes = tall(40);
+        // Разворот, занявший два файла подряд.
+        shapes[12] = PageShape {
+            width: 2800,
+            height: 2000,
+        };
+        shapes[13] = PageShape {
+            width: 2800,
+            height: 2000,
+        };
+        shapes[28] = PageShape {
+            width: 2800,
+            height: 2000,
+        };
+
+        let split = detect_by_page_shape(&shapes).unwrap();
+        let starts: Vec<u32> = split.chapters.iter().map(|c| c.start_page).collect();
+        assert_eq!(
+            starts,
+            vec![0, 12, 28],
+            "13-я страница не должна давать отдельную главу"
+        );
+    }
+
+    #[test]
+    fn boundaries_too_close_together_are_merged() {
+        let mut shapes = tall(40);
+        shapes[10] = PageShape {
+            width: 2800,
+            height: 2000,
+        };
+        shapes[12] = PageShape {
+            width: 2800,
+            height: 2000,
+        }; // всего через 2 страницы
+        shapes[30] = PageShape {
+            width: 2800,
+            height: 2000,
+        };
+
+        let split = detect_by_page_shape(&shapes).unwrap();
+        let starts: Vec<u32> = split.chapters.iter().map(|c| c.start_page).collect();
+        assert_eq!(
+            starts,
+            vec![0, 10, 30],
+            "глава из двух страниц неправдоподобна"
+        );
+    }
+
+    #[test]
+    fn comparison_is_relative_to_the_volume_not_absolute() {
+        // Том из широких сканов: «обычная» страница здесь горизонтальная,
+        // а разворот — ещё шире. Абсолютный порог тут не сработал бы.
+        let mut shapes = vec![
+            PageShape {
+                width: 2000,
+                height: 1600
+            };
+            40
+        ];
+        shapes[12] = PageShape {
+            width: 4000,
+            height: 1600,
+        };
+        shapes[26] = PageShape {
+            width: 4000,
+            height: 1600,
+        };
+
+        let split = detect_by_page_shape(&shapes).unwrap();
+        assert_eq!(split.chapters.len(), 3);
+    }
+
+    #[test]
+    fn short_file_is_not_analysed() {
+        assert!(detect_by_page_shape(&tall(5)).is_none());
     }
 
     #[test]

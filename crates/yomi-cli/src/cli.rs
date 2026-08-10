@@ -102,6 +102,11 @@ pub struct InfoArgs {
     /// Путь к CBZ-архиву, каталогу или изображению
     #[arg(value_name = "ПУТЬ")]
     pub path: PathBuf,
+
+    /// Искать границы глав по пропорциям страниц, если разметки нет.
+    /// Читает размеры всех страниц, поэтому заметно медленнее
+    #[arg(long)]
+    pub deep: bool,
 }
 
 #[derive(Debug, Subcommand)]

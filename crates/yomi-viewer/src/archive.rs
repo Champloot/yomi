@@ -136,6 +136,26 @@ impl PageSource {
         }
     }
 
+    /// Размеры всех страниц в пикселях.
+    ///
+    /// Читает только заголовки изображений, без полного декодирования:
+    /// на томе в две сотни страниц разница принципиальная. Страницы,
+    /// размер которых определить не удалось, пропускаются — битый файл
+    /// не повод отказываться от разбора остальных.
+    pub fn page_shapes(&self) -> Vec<crate::structure::PageShape> {
+        (0..self.page_count())
+            .filter_map(|i| {
+                let bytes = self.read_page(i).ok()?;
+                let (width, height) = image::io::Reader::new(std::io::Cursor::new(bytes))
+                    .with_guessed_format()
+                    .ok()?
+                    .into_dimensions()
+                    .ok()?;
+                Some(crate::structure::PageShape { width, height })
+            })
+            .collect()
+    }
+
     /// Путь к источнику — для сообщений и чтения метаданных.
     pub fn path(&self) -> &Path {
         match self {
