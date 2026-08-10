@@ -8,6 +8,7 @@
 
 pub mod naming;
 pub mod package;
+pub mod parse;
 pub mod select;
 
 pub use package::{write_cbz, PagePayload};
