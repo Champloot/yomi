@@ -388,3 +388,113 @@ fn pack_needs_a_directory_not_a_file() {
     std::fs::write(&file, png_bytes()).unwrap();
     assert_ne!(code(&run(&dir, &["pack", file.to_str().unwrap()])), 0);
 }
+
+/// Готовит библиотеку с одним файлом и возвращает путь к нему.
+fn library_with_file(dir: &Path, pages: usize) -> PathBuf {
+    let manga_dir = dir.join("манга").join("Тайтл");
+    std::fs::create_dir_all(&manga_dir).unwrap();
+    let file = manga_dir.join("Том 1.cbz");
+    make_cbz(&file, pages);
+    run(
+        dir,
+        &["library", "scan", dir.join("манга").to_str().unwrap()],
+    );
+    file
+}
+
+#[test]
+fn marks_can_be_added_listed_and_removed() {
+    let dir = temp_dir("marksflow");
+    let file = library_with_file(&dir, 30);
+    let path = file.to_str().unwrap();
+
+    assert_eq!(
+        code(&run(
+            &dir,
+            &["marks", "add", path, "10", "--title", "Вторая"]
+        )),
+        0
+    );
+    assert_eq!(code(&run(&dir, &["marks", "add", path, "1"])), 0);
+
+    let listed = run(&dir, &["marks", "list", path]);
+    assert_eq!(code(&listed), 0);
+    let text = stdout(&listed);
+    assert!(text.contains("Вторая"), "{text}");
+    assert!(text.contains("Всего глав: 2"), "{text}");
+
+    assert_eq!(code(&run(&dir, &["marks", "remove", path, "10"])), 0);
+    assert!(stdout(&run(&dir, &["marks", "list", path])).contains("Всего глав: 1"));
+}
+
+#[test]
+fn marks_reject_page_numbers_outside_the_file() {
+    let dir = temp_dir("marksrange");
+    let file = library_with_file(&dir, 5);
+    let path = file.to_str().unwrap();
+
+    assert_ne!(
+        code(&run(&dir, &["marks", "add", path, "0"])),
+        0,
+        "нумерация с единицы"
+    );
+    assert_ne!(
+        code(&run(&dir, &["marks", "add", path, "99"])),
+        0,
+        "страницы нет"
+    );
+}
+
+#[test]
+fn marks_require_the_file_to_be_in_the_library() {
+    let dir = temp_dir("marksunknown");
+    let loose = dir.join("одинокий.cbz");
+    make_cbz(&loose, 3);
+    // Библиотеку создаём, но файл в неё не попадает.
+    run(&dir, &["library", "list"]);
+
+    let out = run(&dir, &["marks", "list", loose.to_str().unwrap()]);
+    assert_ne!(code(&out), 0);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("library scan"));
+}
+
+#[test]
+fn marks_are_not_replaced_without_force() {
+    let dir = temp_dir("marksforce");
+    let file = library_with_file(&dir, 20);
+    let path = file.to_str().unwrap();
+
+    run(&dir, &["marks", "add", path, "5"]);
+    let out = run(&dir, &["marks", "detect", path, "--deep"]);
+    assert_ne!(code(&out), 0, "существующие отметки нельзя затирать молча");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--force"));
+}
+
+#[test]
+fn marks_survive_a_library_rescan() {
+    // Ручной труд не должен пропадать при обновлении библиотеки.
+    let dir = temp_dir("marksrescan");
+    let file = library_with_file(&dir, 20);
+    let path = file.to_str().unwrap();
+
+    run(&dir, &["marks", "add", path, "7", "--title", "Ручная"]);
+    run(
+        &dir,
+        &["library", "scan", dir.join("манга").to_str().unwrap()],
+    );
+
+    let text = stdout(&run(&dir, &["marks", "list", path]));
+    assert!(text.contains("Ручная"), "отметка должна уцелеть: {text}");
+}
+
+#[test]
+fn clearing_removes_every_mark() {
+    let dir = temp_dir("marksclear");
+    let file = library_with_file(&dir, 20);
+    let path = file.to_str().unwrap();
+
+    run(&dir, &["marks", "add", path, "3"]);
+    run(&dir, &["marks", "add", path, "9"]);
+    assert_eq!(code(&run(&dir, &["marks", "clear", path])), 0);
+    assert!(stdout(&run(&dir, &["marks", "list", path])).contains("Отметок нет"));
+}

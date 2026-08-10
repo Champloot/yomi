@@ -7,6 +7,7 @@
 mod config_cmd;
 mod info;
 mod library;
+mod marks;
 mod pack;
 mod read;
 
@@ -31,6 +32,7 @@ pub async fn dispatch(cli: &Cli) -> Result<()> {
         Command::Info(args) => info::run(args).await,
         Command::Pack(args) => pack::run(args).await,
         Command::Library(cmd) => library::run(&ctx, cmd).await,
+        Command::Marks(cmd) => marks::run(cmd).await,
         Command::Config(cmd) => config_cmd::run(&ctx, cmd, cli.config.as_deref()).await,
     }
 }

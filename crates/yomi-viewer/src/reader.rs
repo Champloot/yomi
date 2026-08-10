@@ -8,6 +8,33 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use std::io::Write;
 
+/// Доступ к отметкам глав.
+///
+/// Трейт, а не структура: `yomi-viewer` не знает про базу данных и не
+/// должен узнать. Реализацию поверх хранилища даёт приложение.
+pub trait ChapterMarks {
+    /// Страницы, отмеченные как начала глав, по возрастанию.
+    fn pages(&self) -> Vec<u32>;
+    /// Переключает отметку. Возвращает true, если отметка появилась.
+    fn toggle(&mut self, page: u32) -> bool;
+}
+
+/// Параметры сеанса чтения.
+///
+/// Отдельная структура вместо шести аргументов: список параметров
+/// `run` разрастался с каждым этапом, и перепутать местами два `u8`
+/// стало вопросом времени.
+pub struct Session<'a> {
+    pub render: Options,
+    pub direction: Direction,
+    /// Сколько соседних страниц готовить заранее.
+    pub preload: u8,
+    /// С какой страницы начинать, с нуля.
+    pub start_page: usize,
+    /// Отметки глав, если файл есть в библиотеке.
+    pub marks: Option<&'a mut dyn ChapterMarks>,
+}
+
 /// Направление чтения. Для манги традиционно справа налево: первая
 /// страница расположена справа, и «дальше по сюжету» — это влево.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -38,6 +65,12 @@ enum Input {
     Up,
     First,
     Last,
+    /// Поставить или снять отметку начала главы.
+    ToggleMark,
+    /// К началу следующей размеченной главы.
+    NextChapter,
+    /// К началу предыдущей.
+    PrevChapter,
     Quit,
     Redraw,
     Noop,
@@ -50,6 +83,12 @@ enum Action {
     Prev,
     First,
     Last,
+    /// Поставить или снять отметку начала главы на текущей странице.
+    ToggleMark,
+    /// К началу следующей размеченной главы.
+    NextChapter,
+    /// К началу предыдущей.
+    PrevChapter,
     Quit,
     Redraw,
     Noop,
@@ -65,6 +104,11 @@ fn input_for(event: Event) -> Input {
             KeyCode::Up | KeyCode::Char('k') | KeyCode::Backspace => Input::Up,
             KeyCode::Char('g') => Input::First,
             KeyCode::Char('G') => Input::Last,
+            KeyCode::Char('m') => Input::ToggleMark,
+            // Скобки для перехода по главам — привычно тем, кто
+            // пользуется vim: там так ходят по абзацам и функциям.
+            KeyCode::Char(']') => Input::NextChapter,
+            KeyCode::Char('[') => Input::PrevChapter,
             KeyCode::Char('q') | KeyCode::Esc => Input::Quit,
             _ => Input::Noop,
         },
@@ -89,6 +133,12 @@ fn action_for(input: Input, direction: Direction) -> Action {
         },
         Input::First => Action::First,
         Input::Last => Action::Last,
+        Input::ToggleMark => Action::ToggleMark,
+        // Переход по главам не зеркалится направлением чтения:
+        // «следующая глава» — это дальше по сюжету в любом случае,
+        // в отличие от стрелок, которые описывают сторону экрана.
+        Input::NextChapter => Action::NextChapter,
+        Input::PrevChapter => Action::PrevChapter,
         Input::Quit => Action::Quit,
         Input::Redraw => Action::Redraw,
         Input::Noop => Action::Noop,
@@ -96,19 +146,15 @@ fn action_for(input: Input, direction: Direction) -> Action {
 }
 
 /// Запускает интерактивное чтение. Блокирует до выхода пользователя.
-pub fn run(
-    source: &PageSource,
-    opts: Options,
-    direction: Direction,
-    preload: u8,
-    start_page: usize,
-) -> Result<usize> {
-    let mut current = start_page.min(source.page_count().saturating_sub(1));
+pub fn run(source: &PageSource, mut session: Session<'_>) -> Result<usize> {
+    let mut current = session
+        .start_page
+        .min(source.page_count().saturating_sub(1));
 
     enable_raw_mode().map_err(|e| Error::Terminal(e.to_string()))?;
     // Гарантируем возврат терминала в нормальный режим даже при ошибке
     // рендера — иначе пользователь останется с «немым» терминалом.
-    let result = run_loop(source, opts, direction, preload, &mut current);
+    let result = run_loop(source, &mut session, &mut current);
     let _ = disable_raw_mode();
     print!("\r\n");
     let _ = std::io::stdout().flush();
@@ -117,25 +163,28 @@ pub fn run(
     result.map(|()| current)
 }
 
-fn run_loop(
-    source: &PageSource,
-    opts: Options,
-    direction: Direction,
-    preload: u8,
-    current: &mut usize,
-) -> Result<()> {
+fn run_loop(source: &PageSource, session: &mut Session<'_>, current: &mut usize) -> Result<()> {
     let mut stdout = std::io::stdout();
     let total = source.page_count();
-    let mut cache = PageCache::new(preload);
+    let mut cache = PageCache::new(session.preload);
 
     loop {
+        // Список отметок перечитывается каждый кадр: он меняется прямо
+        // во время чтения, когда пользователь ставит новую отметку.
+        let marks = session
+            .marks
+            .as_ref()
+            .map(|m| m.pages())
+            .unwrap_or_default();
+
         draw_page(
             source,
             &mut cache,
-            opts,
-            direction,
+            session.render,
+            session.direction,
             *current,
             total,
+            &marks,
             &mut stdout,
         )?;
         // Соседние страницы готовим после отрисовки текущей, чтобы
@@ -143,19 +192,43 @@ fn run_loop(
         cache.preload_around(source, *current);
 
         let input = input_for(event::read().map_err(|e| Error::Terminal(e.to_string()))?);
-        match action_for(input, direction) {
+        match action_for(input, session.direction) {
             Action::Next if *current + 1 < total => *current += 1,
             Action::Next => {}
             Action::Prev if *current > 0 => *current -= 1,
             Action::Prev => {}
             Action::First => *current = 0,
             Action::Last => *current = total.saturating_sub(1),
+            Action::ToggleMark => {
+                if let Some(marks) = session.marks.as_mut() {
+                    marks.toggle(*current as u32);
+                }
+            }
+            Action::NextChapter => {
+                if let Some(next) = marks.iter().find(|p| **p as usize > *current) {
+                    *current = *next as usize;
+                }
+            }
+            Action::PrevChapter => {
+                // К началу текущей главы, а не сразу к предыдущей:
+                // так же ведёт себя переход к предыдущему треку в
+                // проигрывателях, и это привычнее.
+                let current_start = marks
+                    .iter()
+                    .rev()
+                    .find(|p| (**p as usize) < *current)
+                    .copied();
+                if let Some(start) = current_start {
+                    *current = start as usize;
+                }
+            }
             Action::Redraw | Action::Noop => {}
             Action::Quit => return Ok(()),
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_page(
     source: &PageSource,
     cache: &mut PageCache,
@@ -163,6 +236,7 @@ fn draw_page(
     direction: Direction,
     index: usize,
     total: usize,
+    marks: &[u32],
     stdout: &mut impl Write,
 ) -> Result<()> {
     let mut size = terminal::size()?;
@@ -181,19 +255,43 @@ fn draw_page(
     // «влево» листает вперёд, и молча оставлять «←/→ — листать»
     // означало бы вводить читателя в заблуждение.
     let hint = match direction {
-        Direction::RightToLeft => "← дальше, → назад",
-        Direction::LeftToRight => "→ дальше, ← назад",
-        Direction::Webtoon => "↓ дальше, ↑ назад",
+        Direction::RightToLeft => "← дальше",
+        Direction::LeftToRight => "→ дальше",
+        Direction::Webtoon => "↓ дальше",
     };
+
+    let chapter = chapter_status(marks, index);
     write!(
         stdout,
-        "\r\nстраница {}/{}  [{hint}, q — выход]",
+        "\r\nстраница {}/{}{}  [{hint}, m — отметить главу, q — выход]",
         index + 1,
-        total
+        total,
+        chapter
     )
     .map_err(Error::Io)?;
     stdout.flush().map_err(Error::Io)?;
     Ok(())
+}
+
+/// Описание текущей главы для строки состояния.
+///
+/// Возвращает пустую строку, когда разметки нет: показывать «глава 1/1»
+/// на неразмеченном томе — шум, а не информация.
+fn chapter_status(marks: &[u32], page: usize) -> String {
+    if marks.is_empty() {
+        return String::new();
+    }
+
+    let here = marks.iter().any(|p| *p as usize == page);
+    let index = marks.iter().filter(|p| (**p as usize) <= page).count();
+
+    if index == 0 {
+        // Страница до первой отметки — ещё не глава.
+        return format!("  (до главы 1 из {})", marks.len());
+    }
+
+    let mark = if here { " ●" } else { "" };
+    format!("  гл. {}/{}{}", index, marks.len(), mark)
 }
 
 #[cfg(test)]
@@ -263,6 +361,58 @@ mod tests {
             assert_eq!(act(KeyCode::Char('g'), dir), Action::First);
             assert_eq!(act(KeyCode::Char('G'), dir), Action::Last);
         }
+    }
+
+    #[test]
+    fn mark_key_works_in_every_direction() {
+        for dir in [
+            Direction::RightToLeft,
+            Direction::LeftToRight,
+            Direction::Webtoon,
+        ] {
+            assert_eq!(act(KeyCode::Char('m'), dir), Action::ToggleMark, "{dir:?}");
+        }
+    }
+
+    #[test]
+    fn chapter_navigation_is_not_mirrored_by_direction() {
+        // Скобки описывают движение по сюжету, а не сторону экрана,
+        // поэтому направление чтения их не переворачивает.
+        for dir in [Direction::RightToLeft, Direction::LeftToRight] {
+            assert_eq!(act(KeyCode::Char(']'), dir), Action::NextChapter, "{dir:?}");
+            assert_eq!(act(KeyCode::Char('['), dir), Action::PrevChapter, "{dir:?}");
+        }
+    }
+
+    #[test]
+    fn status_is_empty_without_marks() {
+        assert_eq!(chapter_status(&[], 5), "");
+    }
+
+    #[test]
+    fn status_counts_chapters_from_marks() {
+        let marks = [0u32, 20, 40];
+        assert!(chapter_status(&marks, 0).contains("гл. 1/3"));
+        assert!(chapter_status(&marks, 25).contains("гл. 2/3"));
+        assert!(chapter_status(&marks, 45).contains("гл. 3/3"));
+    }
+
+    #[test]
+    fn status_marks_the_page_that_starts_a_chapter() {
+        let marks = [0u32, 20];
+        assert!(
+            chapter_status(&marks, 20).contains('●'),
+            "начало главы должно быть заметно"
+        );
+        assert!(!chapter_status(&marks, 21).contains('●'));
+    }
+
+    #[test]
+    fn pages_before_the_first_mark_are_not_a_chapter() {
+        // Обложка и оглавление идут до первой главы — нумеровать их
+        // как главу неверно.
+        let status = chapter_status(&[10u32, 30], 3);
+        assert!(status.contains("до главы 1"), "{status}");
     }
 
     #[test]

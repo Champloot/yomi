@@ -13,7 +13,7 @@ use crate::{Error, Result};
 use rusqlite::Connection;
 
 /// Версия схемы, которую понимает эта сборка.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// Одна миграция: SQL, поднимающий схему с `version - 1` до `version`.
 struct Migration {
@@ -76,6 +76,29 @@ CREATE INDEX idx_progress_updated ON progress(updated_at DESC);
         // записи получают 'unknown' — пересканирование их обновит.
         sql: r#"
 ALTER TABLE chapters ADD COLUMN kind TEXT NOT NULL DEFAULT 'unknown';
+"#,
+    },
+    Migration {
+        version: 3,
+        // Отметки начала глав внутри файла, расставленные вручную.
+        //
+        // Ссылается на chapters — то есть на файл, который сам может быть
+        // томом. Именование неудачное, но менять его сейчас означало бы
+        // переписывать половину схемы ради красоты: строка в chapters —
+        // это единица библиотеки, а марки делят её на части.
+        //
+        // Отдельная таблица, а не колонка: пересканирование обновляет
+        // chapters через UPSERT и не должно задевать ручной труд.
+        sql: r#"
+CREATE TABLE chapter_marks (
+    id         INTEGER PRIMARY KEY,
+    chapter_id INTEGER NOT NULL REFERENCES chapters(id) ON DELETE CASCADE,
+    page       INTEGER NOT NULL,
+    title      TEXT,
+    UNIQUE (chapter_id, page)
+);
+
+CREATE INDEX idx_marks_chapter ON chapter_marks(chapter_id, page);
 "#,
     },
 ];

@@ -76,6 +76,26 @@ pub struct Progress {
     pub completed: bool,
 }
 
+/// Отметка начала главы внутри файла, поставленная вручную.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChapterMark {
+    pub id: i64,
+    pub chapter_id: i64,
+    /// Номер страницы с нуля.
+    pub page: u32,
+    pub title: Option<String>,
+}
+
+impl ChapterMark {
+    /// Название для показа: своё, если задано, иначе порядковый номер.
+    pub fn label(&self, index: usize) -> String {
+        match &self.title {
+            Some(t) if !t.trim().is_empty() => t.clone(),
+            _ => format!("Глава {}", index + 1),
+        }
+    }
+}
+
 /// Что записать в библиотеку при сканировании: тайтл вместе с главами.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScannedManga {

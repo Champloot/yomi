@@ -13,6 +13,7 @@ use yomi_viewer::archive::PageSource;
 use yomi_viewer::capability::{self, Protocol};
 use yomi_viewer::fit::Fit;
 use yomi_viewer::reader::Direction;
+use yomi_viewer::reader::{ChapterMarks, Session};
 use yomi_viewer::render::Options;
 
 /// Переводит выбор из конфига/флага в протокол. `Auto` — единственный
@@ -140,13 +141,28 @@ pub async fn run(ctx: &Ctx, args: &ReadArgs) -> Result<()> {
         _ => start,
     };
 
-    let outcome = yomi_viewer::reader::run(
-        &source,
-        opts,
+    // Отметки доступны только для файлов, попавших в библиотеку:
+    // хранить их привязанными к пути вне базы негде.
+    let mut marks = match (&store, &known_chapter) {
+        (Some(store), Some(chapter)) => Some(StoreMarks {
+            store,
+            chapter_id: chapter.id,
+        }),
+        _ => None,
+    };
+    if marks.is_none() {
+        tracing::info!("файла нет в библиотеке: отметки глав недоступны");
+    }
+
+    let session = Session {
+        render: opts,
         direction,
-        ctx.config.reader.preload_pages,
-        start,
-    );
+        preload: ctx.config.reader.preload_pages,
+        start_page: start,
+        marks: marks.as_mut().map(|m| m as &mut dyn ChapterMarks),
+    };
+
+    let outcome = yomi_viewer::reader::run(&source, session);
 
     if let (Some(store), Some(chapter)) = (&store, &known_chapter) {
         // При ошибке рендера сохраняем хотя бы стартовую позицию:
@@ -163,6 +179,38 @@ pub async fn run(ctx: &Ctx, args: &ReadArgs) -> Result<()> {
     outcome
         .map(|_| ())
         .map_err(|e| anyhow::anyhow!(e).context("отображение страниц"))
+}
+
+/// Отметки глав поверх библиотеки.
+///
+/// Реализует трейт из `yomi-viewer`, который про базу не знает. Ошибки
+/// записи гасятся с записью в лог: сорвать чтение из-за неудачной
+/// отметки хуже, чем потерять саму отметку.
+struct StoreMarks<'a> {
+    store: &'a yomi_db::Store,
+    chapter_id: i64,
+}
+
+impl ChapterMarks for StoreMarks<'_> {
+    fn pages(&self) -> Vec<u32> {
+        match self.store.marks_of(self.chapter_id) {
+            Ok(marks) => marks.into_iter().map(|m| m.page).collect(),
+            Err(e) => {
+                tracing::warn!(error = %e, "не удалось прочитать отметки глав");
+                Vec::new()
+            }
+        }
+    }
+
+    fn toggle(&mut self, page: u32) -> bool {
+        match self.store.toggle_mark(self.chapter_id, page, None) {
+            Ok(added) => added,
+            Err(e) => {
+                tracing::warn!(error = %e, "не удалось изменить отметку");
+                false
+            }
+        }
+    }
 }
 
 /// Открывает библиотеку, молча возвращая None при любой проблеме.

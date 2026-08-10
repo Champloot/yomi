@@ -6,7 +6,9 @@
 //! удалении каскад унёс бы и прогресс.
 
 use crate::migrations;
-use crate::model::{LibraryChapter, LibraryManga, Progress, ScannedManga, LOCAL_SOURCE};
+use crate::model::{
+    ChapterMark, LibraryChapter, LibraryManga, Progress, ScannedManga, LOCAL_SOURCE,
+};
 use crate::{Error, Result};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use std::path::Path;
@@ -318,6 +320,62 @@ impl Store {
         )?)
     }
 
+    /// Отметки глав внутри файла, по возрастанию страницы.
+    pub fn marks_of(&self, chapter_id: i64) -> Result<Vec<ChapterMark>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, chapter_id, page, title FROM chapter_marks
+             WHERE chapter_id = ?1 ORDER BY page",
+        )?;
+        let rows = stmt.query_map(params![chapter_id], |r| {
+            Ok(ChapterMark {
+                id: r.get(0)?,
+                chapter_id: r.get(1)?,
+                page: r.get::<_, i64>(2)? as u32,
+                title: r.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Ставит отметку. Повторная установка на ту же страницу обновляет
+    /// название, а не создаёт вторую отметку.
+    pub fn add_mark(&self, chapter_id: i64, page: u32, title: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO chapter_marks (chapter_id, page, title) VALUES (?1, ?2, ?3)
+             ON CONFLICT (chapter_id, page) DO UPDATE SET title = excluded.title",
+            params![chapter_id, page, title],
+        )?;
+        Ok(())
+    }
+
+    /// Снимает отметку. Возвращает true, если она там была.
+    pub fn remove_mark(&self, chapter_id: i64, page: u32) -> Result<bool> {
+        let removed = self.conn.execute(
+            "DELETE FROM chapter_marks WHERE chapter_id = ?1 AND page = ?2",
+            params![chapter_id, page],
+        )?;
+        Ok(removed > 0)
+    }
+
+    /// Ставит отметку, если её не было, и снимает, если была.
+    ///
+    /// Нужна читалке: одна клавиша и для установки, и для снятия —
+    /// иначе пользователю пришлось бы помнить состояние текущей страницы.
+    pub fn toggle_mark(&self, chapter_id: i64, page: u32, title: Option<&str>) -> Result<bool> {
+        if self.remove_mark(chapter_id, page)? {
+            return Ok(false);
+        }
+        self.add_mark(chapter_id, page, title)?;
+        Ok(true)
+    }
+
+    pub fn clear_marks(&self, chapter_id: i64) -> Result<usize> {
+        Ok(self.conn.execute(
+            "DELETE FROM chapter_marks WHERE chapter_id = ?1",
+            params![chapter_id],
+        )?)
+    }
+
     pub fn manga_count(&self) -> Result<i64> {
         Ok(self
             .conn
@@ -597,6 +655,110 @@ mod tests {
         s.upsert_scanned(&other).unwrap();
 
         assert_eq!(s.all_chapters().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn marks_are_stored_and_returned_in_page_order() {
+        let mut s = Store::open_in_memory().unwrap();
+        let (manga_id, _) = s
+            .upsert_scanned(&scanned(vec![chapter("/манга/Тайтл/том1.cbz", 1.0)]))
+            .unwrap();
+        let file = s.chapters_of(manga_id).unwrap()[0].id;
+
+        s.add_mark(file, 40, Some("Глава 3")).unwrap();
+        s.add_mark(file, 0, Some("Глава 1")).unwrap();
+        s.add_mark(file, 20, None).unwrap();
+
+        let marks = s.marks_of(file).unwrap();
+        assert_eq!(
+            marks.iter().map(|m| m.page).collect::<Vec<_>>(),
+            vec![0, 20, 40]
+        );
+        assert_eq!(marks[0].title.as_deref(), Some("Глава 1"));
+    }
+
+    #[test]
+    fn marking_the_same_page_twice_updates_the_title() {
+        let mut s = Store::open_in_memory().unwrap();
+        let (manga_id, _) = s
+            .upsert_scanned(&scanned(vec![chapter("/манга/Тайтл/том1.cbz", 1.0)]))
+            .unwrap();
+        let file = s.chapters_of(manga_id).unwrap()[0].id;
+
+        s.add_mark(file, 10, Some("Старое")).unwrap();
+        s.add_mark(file, 10, Some("Новое")).unwrap();
+
+        let marks = s.marks_of(file).unwrap();
+        assert_eq!(marks.len(), 1, "вторая отметка на той же странице не нужна");
+        assert_eq!(marks[0].title.as_deref(), Some("Новое"));
+    }
+
+    #[test]
+    fn toggle_adds_then_removes() {
+        let mut s = Store::open_in_memory().unwrap();
+        let (manga_id, _) = s
+            .upsert_scanned(&scanned(vec![chapter("/манга/Тайтл/том1.cbz", 1.0)]))
+            .unwrap();
+        let file = s.chapters_of(manga_id).unwrap()[0].id;
+
+        assert!(
+            s.toggle_mark(file, 5, None).unwrap(),
+            "первое нажатие ставит"
+        );
+        assert_eq!(s.marks_of(file).unwrap().len(), 1);
+
+        assert!(!s.toggle_mark(file, 5, None).unwrap(), "второе снимает");
+        assert!(s.marks_of(file).unwrap().is_empty());
+    }
+
+    #[test]
+    fn rescanning_preserves_manual_marks() {
+        // Главное свойство: ручной труд не должен пропадать при
+        // обновлении библиотеки. То же правило, что и для прогресса.
+        let mut s = Store::open_in_memory().unwrap();
+        let data = scanned(vec![chapter("/манга/Тайтл/том1.cbz", 1.0)]);
+        let (manga_id, _) = s.upsert_scanned(&data).unwrap();
+        let file = s.chapters_of(manga_id).unwrap()[0].id;
+
+        s.add_mark(file, 24, Some("Глава 2")).unwrap();
+        s.upsert_scanned(&data).unwrap();
+
+        let marks = s.marks_of(file).unwrap();
+        assert_eq!(marks.len(), 1, "отметка должна уцелеть");
+        assert_eq!(marks[0].page, 24);
+    }
+
+    #[test]
+    fn marks_disappear_with_the_file_they_belong_to() {
+        let mut s = Store::open_in_memory().unwrap();
+        let (manga_id, _) = s
+            .upsert_scanned(&scanned(vec![chapter("/манга/Тайтл/том1.cbz", 1.0)]))
+            .unwrap();
+        let file = s.chapters_of(manga_id).unwrap()[0].id;
+        s.add_mark(file, 3, None).unwrap();
+
+        s.delete_chapters(&[file]).unwrap();
+        assert!(s.marks_of(file).unwrap().is_empty());
+    }
+
+    #[test]
+    fn unnamed_marks_get_numbered_labels() {
+        let mark = crate::model::ChapterMark {
+            id: 1,
+            chapter_id: 1,
+            page: 0,
+            title: None,
+        };
+        assert_eq!(mark.label(0), "Глава 1");
+        assert_eq!(mark.label(4), "Глава 5");
+
+        let named = crate::model::ChapterMark {
+            id: 2,
+            chapter_id: 1,
+            page: 10,
+            title: Some("Особая".into()),
+        };
+        assert_eq!(named.label(0), "Особая");
     }
 
     #[test]

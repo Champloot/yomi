@@ -55,6 +55,10 @@ pub enum Command {
     /// Собрать CBZ из каталога с картинками
     Pack(PackArgs),
 
+    /// Отметки начала глав внутри файла
+    #[command(subcommand)]
+    Marks(MarksCommand),
+
     /// Локальная библиотека
     #[command(subcommand)]
     Library(LibraryCommand),
@@ -185,6 +189,49 @@ pub enum RendererArg {
     Iterm2,
     Sixel,
     Blocks,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum MarksCommand {
+    /// Показать отметки файла
+    List {
+        /// Путь к файлу
+        #[arg(value_name = "ПУТЬ")]
+        path: PathBuf,
+    },
+    /// Поставить отметку на страницу (нумерация с единицы)
+    Add {
+        #[arg(value_name = "ПУТЬ")]
+        path: PathBuf,
+        #[arg(value_name = "СТРАНИЦА")]
+        page: u32,
+        /// Название главы
+        #[arg(long)]
+        title: Option<String>,
+    },
+    /// Снять отметку со страницы
+    Remove {
+        #[arg(value_name = "ПУТЬ")]
+        path: PathBuf,
+        #[arg(value_name = "СТРАНИЦА")]
+        page: u32,
+    },
+    /// Заполнить отметки тем, что нашла автоматика (разметка или развороты)
+    Detect {
+        #[arg(value_name = "ПУТЬ")]
+        path: PathBuf,
+        /// Искать границы по пропорциям страниц, если разметки нет
+        #[arg(long)]
+        deep: bool,
+        /// Заменить существующие отметки
+        #[arg(long)]
+        force: bool,
+    },
+    /// Снять все отметки файла
+    Clear {
+        #[arg(value_name = "ПУТЬ")]
+        path: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
