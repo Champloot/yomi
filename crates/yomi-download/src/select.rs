@@ -75,6 +75,7 @@ mod tests {
                 language: "ru".into(),
                 scanlator: None,
                 published_at: None,
+                external_url: None,
             })
             .collect()
     }

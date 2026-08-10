@@ -14,6 +14,8 @@ pub const REPORT_URL: &str = "https://api.mangadex.network/report";
 /// Общий предел сервиса — пять запросов в секунду.
 const REQUESTS_PER_SECOND: u32 = 5;
 const MAX_ATTEMPTS: u32 = 4;
+/// Отчёт — служебная мелочь, ждать его дольше нескольких секунд незачем.
+const REPORT_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct MangaDexClient {
     http: reqwest::Client,
@@ -124,8 +126,15 @@ impl MangaDexClient {
             Err(_) => (Vec::new(), false, false),
         };
 
-        self.report(url, success, cached, bytes.len(), started.elapsed())
-            .await;
+        self.report(url, success, cached, bytes.len(), started.elapsed());
+
+        tracing::debug!(
+            url,
+            bytes = bytes.len(),
+            ms = started.elapsed().as_millis() as u64,
+            cached,
+            "страница загружена"
+        );
 
         if success && !bytes.is_empty() {
             Ok(bytes)
@@ -136,14 +145,17 @@ impl MangaDexClient {
         }
     }
 
-    async fn report(
-        &self,
-        url: &str,
-        success: bool,
-        cached: bool,
-        bytes: usize,
-        duration: Duration,
-    ) {
+    /// Отправляет отчёт о загрузке в фоне.
+    ///
+    /// Раньше отчёт ожидался перед выдачей страницы, и каждая картинка
+    /// стоила лишнего запроса к другому домену — с общим тайм-аутом
+    /// в тридцать секунд. На практике это давало около минуты на
+    /// несколько страниц.
+    ///
+    /// Отчёт обязателен по условиям пользования сетью, но пользователю
+    /// незачем его дожидаться: задача уходит в фон со своим коротким
+    /// тайм-аутом.
+    fn report(&self, url: &str, success: bool, cached: bool, bytes: usize, duration: Duration) {
         if url.contains("mangadex.org") {
             return;
         }
@@ -154,9 +166,16 @@ impl MangaDexClient {
             "bytes": bytes,
             "duration": duration.as_millis() as u64,
         });
-        // Неудачный отчёт не должен мешать чтению: логируем и живём дальше.
-        if let Err(e) = self.http.post(REPORT_URL).json(&payload).send().await {
-            tracing::debug!(error = %e, "не удалось отправить отчёт о загрузке");
-        }
+
+        // Клонирование клиента дёшево: внутри общий пул соединений.
+        let http = self.http.clone();
+        tokio::spawn(async move {
+            let request = http.post(REPORT_URL).json(&payload).send();
+            match tokio::time::timeout(REPORT_TIMEOUT, request).await {
+                Ok(Err(e)) => tracing::debug!(error = %e, "отчёт о загрузке не отправлен"),
+                Err(_) => tracing::debug!("отчёт о загрузке не уложился в тайм-аут"),
+                Ok(Ok(_)) => {}
+            }
+        });
     }
 }

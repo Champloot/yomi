@@ -151,6 +151,7 @@ mod tests {
             language: "ru".into(),
             scanlator: Some("Команда & Ко".into()),
             published_at: None,
+            external_url: None,
         }
     }
 

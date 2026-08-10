@@ -113,6 +113,7 @@ mod tests {
             language: "ru".into(),
             scanlator: Some("Команда".into()),
             published_at: None,
+            external_url: None,
         }
     }
 

@@ -128,6 +128,7 @@ impl Source for DemoSource {
                 language: "ru".into(),
                 scanlator: Some("Вымышленная команда".into()),
                 published_at: Some("2024-01-01T00:00:00Z".into()),
+                external_url: None,
             })
             .collect())
     }

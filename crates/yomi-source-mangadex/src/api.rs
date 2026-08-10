@@ -249,6 +249,7 @@ impl ChapterEntity {
                 .into_iter()
                 .next(),
             published_at: attrs.publish_at,
+            external_url: attrs.external_url,
         }
     }
 }

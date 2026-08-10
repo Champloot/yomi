@@ -192,15 +192,10 @@ impl Source for MangaDexSource {
             let response: ListResponse<ChapterEntity> = self.client.get_json(&url).await?;
 
             let received = response.data.len() as u32;
-            all.extend(
-                response
-                    .data
-                    .into_iter()
-                    // Главы, читаемые на стороннем сайте, скачать нельзя:
-                    // показывать их в списке — вводить в заблуждение.
-                    .filter(|c| c.attributes.external_url.is_none())
-                    .map(|c| c.into_domain(manga_id)),
-            );
+            // Главы со ссылкой на сторонний сайт остаются в списке
+            // с пометкой: прятать их — значит утверждать, что переводов
+            // нет, тогда как они есть, просто читаются в другом месте.
+            all.extend(response.data.into_iter().map(|c| c.into_domain(manga_id)));
 
             offset += received;
             match response.total {

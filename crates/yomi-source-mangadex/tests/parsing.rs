@@ -173,3 +173,39 @@ fn trailing_slash_in_base_url_does_not_double_up() {
         "https://example.org/data/h/1.png"
     );
 }
+
+#[test]
+fn external_chapters_are_kept_and_marked() {
+    // Лицензированные тайтлы (One Piece и подобные) отдаются ссылкой
+    // на сторонний сайт. Прятать такие главы нельзя: пользователь
+    // решит, что переводов нет, тогда как они есть.
+    let raw = include_str!("fixtures/chapter_feed.json");
+    let parsed: ListResponse<ChapterEntity> = serde_json::from_str(raw).unwrap();
+    let chapters: Vec<_> = parsed
+        .data
+        .into_iter()
+        .map(|c| c.into_domain("m"))
+        .collect();
+
+    assert_eq!(chapters.len(), 3, "внешняя глава должна остаться в списке");
+
+    let external: Vec<_> = chapters.iter().filter(|c| !c.is_downloadable()).collect();
+    assert_eq!(external.len(), 1);
+    assert_eq!(
+        external[0].external_url.as_deref(),
+        Some("https://example.com/read-elsewhere")
+    );
+}
+
+#[test]
+fn ordinary_chapters_are_downloadable() {
+    let raw = include_str!("fixtures/chapter_feed.json");
+    let parsed: ListResponse<ChapterEntity> = serde_json::from_str(raw).unwrap();
+    let chapters: Vec<_> = parsed
+        .data
+        .into_iter()
+        .map(|c| c.into_domain("m"))
+        .collect();
+    assert!(chapters[0].is_downloadable());
+    assert!(chapters[1].is_downloadable());
+}
