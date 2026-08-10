@@ -141,17 +141,29 @@ pub async fn run(ctx: &Ctx, args: &ReadArgs) -> Result<()> {
         _ => start,
     };
 
-    // Отметки доступны только для файлов, попавших в библиотеку:
-    // хранить их привязанными к пути вне базы негде.
-    let mut marks = match (&store, &known_chapter) {
-        (Some(store), Some(chapter)) => Some(StoreMarks {
-            store,
-            chapter_id: chapter.id,
-        }),
-        _ => None,
+    // Закладки внутри файла читаем всегда: их кладёт `yomi build`,
+    // и навигация по главам должна работать сразу после сборки.
+    let from_file: Vec<u32> = yomi_viewer::scan::read_comicinfo(&args.path)
+        .map(|info| info.bookmarks.iter().map(|b| b.page).collect())
+        .unwrap_or_default();
+
+    let mut marks = Marks {
+        store: store.as_ref(),
+        chapter_id: known_chapter.as_ref().map(|c| c.id),
+        from_file,
     };
-    if marks.is_none() {
-        tracing::info!("файла нет в библиотеке: отметки глав недоступны");
+
+    {
+        use yomi_viewer::reader::ChapterMarks as _;
+        let count = marks.pages().len();
+        let editable = known_chapter.is_some();
+        tracing::info!(chapters = count, editable, "разметка глав");
+        if count > 0 && !editable {
+            println!(
+                "Найдено глав: {count}. Переход — клавиши [ и ].\n\
+                 Правка отметок требует библиотеки: `yomi library scan КАТАЛОГ`"
+            );
+        }
     }
 
     let session = Session {
@@ -159,7 +171,7 @@ pub async fn run(ctx: &Ctx, args: &ReadArgs) -> Result<()> {
         direction,
         preload: ctx.config.reader.preload_pages,
         start_page: start,
-        marks: marks.as_mut().map(|m| m as &mut dyn ChapterMarks),
+        marks: Some(&mut marks as &mut dyn ChapterMarks),
     };
 
     let outcome = yomi_viewer::reader::run(&source, session);
@@ -181,19 +193,28 @@ pub async fn run(ctx: &Ctx, args: &ReadArgs) -> Result<()> {
         .map_err(|e| anyhow::anyhow!(e).context("отображение страниц"))
 }
 
-/// Отметки глав поверх библиотеки.
+/// Отметки глав: из библиотеки, а при их отсутствии — из самого файла.
 ///
-/// Реализует трейт из `yomi-viewer`, который про базу не знает. Ошибки
-/// записи гасятся с записью в лог: сорвать чтение из-за неудачной
-/// отметки хуже, чем потерять саму отметку.
-struct StoreMarks<'a> {
-    store: &'a yomi_db::Store,
-    chapter_id: i64,
+/// Два источника нужны, потому что разметка приходит двумя путями.
+/// Ручные отметки живут в базе, а собранный `yomi build` том несёт
+/// закладки внутри `ComicInfo.xml` — и без чтения вторых навигация по
+/// главам не работала бы ровно там, где разметка заведомо есть.
+///
+/// Закладки из файла доступны и когда файла нет в библиотеке: чтобы
+/// листать главы, база не нужна.
+struct Marks<'a> {
+    store: Option<&'a yomi_db::Store>,
+    chapter_id: Option<i64>,
+    /// Закладки из `ComicInfo.xml`.
+    from_file: Vec<u32>,
 }
 
-impl ChapterMarks for StoreMarks<'_> {
-    fn pages(&self) -> Vec<u32> {
-        match self.store.marks_of(self.chapter_id) {
+impl Marks<'_> {
+    fn stored(&self) -> Vec<u32> {
+        let (Some(store), Some(id)) = (self.store, self.chapter_id) else {
+            return Vec::new();
+        };
+        match store.marks_of(id) {
             Ok(marks) => marks.into_iter().map(|m| m.page).collect(),
             Err(e) => {
                 tracing::warn!(error = %e, "не удалось прочитать отметки глав");
@@ -201,9 +222,38 @@ impl ChapterMarks for StoreMarks<'_> {
             }
         }
     }
+}
+
+impl ChapterMarks for Marks<'_> {
+    fn pages(&self) -> Vec<u32> {
+        let stored = self.stored();
+        if stored.is_empty() {
+            self.from_file.clone()
+        } else {
+            stored
+        }
+    }
 
     fn toggle(&mut self, page: u32) -> bool {
-        match self.store.toggle_mark(self.chapter_id, page, None) {
+        let (Some(store), Some(id)) = (self.store, self.chapter_id) else {
+            // Хранить негде: файл вне библиотеки. Закладки из файла
+            // остаются доступными для чтения, но правка требует базы.
+            tracing::info!("файла нет в библиотеке: отметку сохранять некуда");
+            return false;
+        };
+
+        // Первая же правка переносит закладки файла в базу целиком:
+        // иначе снятая отметка вернулась бы из файла при следующем
+        // кадре, и пользователь решил бы, что программа его не слушает.
+        if self.stored().is_empty() && !self.from_file.is_empty() {
+            for existing in &self.from_file {
+                if let Err(e) = store.add_mark(id, *existing, None) {
+                    tracing::warn!(error = %e, "не удалось перенести закладку из файла");
+                }
+            }
+        }
+
+        match store.toggle_mark(id, page, None) {
             Ok(added) => added,
             Err(e) => {
                 tracing::warn!(error = %e, "не удалось изменить отметку");
@@ -213,7 +263,7 @@ impl ChapterMarks for StoreMarks<'_> {
     }
 }
 
-/// Открывает библиотеку, молча возвращая None при любой проблеме.
+/// Открывает библиотеку, молча возвращая None при любой проблеме./// Открывает библиотеку, молча возвращая None при любой проблеме.
 ///
 /// У команды `read` есть смысл и без библиотеки: чтение файла не должно
 /// зависеть от того, заведена ли база.
@@ -234,6 +284,90 @@ fn open_store_quietly() -> Option<yomi_db::Store> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Библиотека с одной записью — возвращает хранилище и её номер.
+    fn library_with_entry() -> (yomi_db::Store, i64) {
+        use yomi_db::model::{ScannedChapter, ScannedManga};
+        let mut store = yomi_db::Store::open_in_memory().unwrap();
+        let scanned = ScannedManga {
+            external_id: "/м/Тайтл".into(),
+            title: "Тайтл".into(),
+            authors: vec![],
+            genres: vec![],
+            status: "unknown".into(),
+            year: None,
+            description: None,
+            chapters: vec![ScannedChapter {
+                external_id: "/м/Тайтл/том.cbz".into(),
+                number: None,
+                volume: Some(1),
+                title: None,
+                language: "ru".into(),
+                scanlator: None,
+                page_count: Some(40),
+                kind: "volume".into(),
+            }],
+        };
+        let (manga_id, _) = store.upsert_scanned(&scanned).unwrap();
+        let id = store.chapters_of(manga_id).unwrap()[0].id;
+        (store, id)
+    }
+
+    #[test]
+    fn file_bookmarks_are_used_when_the_library_has_none() {
+        // Собранный `yomi build` том несёт закладки внутри себя —
+        // без этого навигация не работала бы сразу после сборки.
+        let (store, id) = library_with_entry();
+        let marks = Marks {
+            store: Some(&store),
+            chapter_id: Some(id),
+            from_file: vec![0, 10, 25],
+        };
+        assert_eq!(marks.pages(), vec![0, 10, 25]);
+    }
+
+    #[test]
+    fn manual_marks_take_priority_over_the_file() {
+        let (store, id) = library_with_entry();
+        store.add_mark(id, 7, None).unwrap();
+
+        let marks = Marks {
+            store: Some(&store),
+            chapter_id: Some(id),
+            from_file: vec![0, 10, 25],
+        };
+        assert_eq!(marks.pages(), vec![7], "правка пользователя важнее файла");
+    }
+
+    #[test]
+    fn first_edit_imports_file_bookmarks_so_nothing_reappears() {
+        // Иначе снятая отметка вернулась бы из файла на следующем кадре.
+        let (store, id) = library_with_entry();
+        let mut marks = Marks {
+            store: Some(&store),
+            chapter_id: Some(id),
+            from_file: vec![0, 10, 25],
+        };
+
+        assert!(!marks.toggle(10), "повторное нажатие снимает отметку");
+        assert_eq!(
+            marks.pages(),
+            vec![0, 25],
+            "остальные закладки должны уцелеть"
+        );
+    }
+
+    #[test]
+    fn bookmarks_are_readable_without_a_library() {
+        let mut marks = Marks {
+            store: None,
+            chapter_id: None,
+            from_file: vec![0, 12],
+        };
+        assert_eq!(marks.pages(), vec![0, 12], "листать главы можно и без базы");
+        assert!(!marks.toggle(5), "а сохранять правку некуда");
+        assert_eq!(marks.pages(), vec![0, 12]);
+    }
 
     #[test]
     fn auto_renderer_resolves_from_environment() {

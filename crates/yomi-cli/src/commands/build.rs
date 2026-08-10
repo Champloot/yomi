@@ -170,8 +170,11 @@ fn build_volume(dir: &Path, args: &BuildArgs) -> Result<()> {
     let target = match &args.output {
         Some(path) => path.clone(),
         None => {
+            // Латиница в имени файла намеренно: кириллица в путях
+            // переживает не всякую синхронизацию, архиватор и файловую
+            // систему, а «Vol» понимают и Komga с Kavita.
             let name = match volume {
-                Some(v) => format!("{series}_Том_{v:02}.cbz"),
+                Some(v) => format!("{series}_Vol_{v:02}.cbz"),
                 None => format!("{series}.cbz"),
             };
             dir.parent().unwrap_or(dir).join(name)
@@ -394,6 +397,22 @@ fn add_to_volume(volume_path: &Path, chapter_path: &Path, args: &BuildArgs) -> R
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
     let parsed = parse::analyze(&[stem.clone()]);
+
+    // Глава из другого тома — не запрет, но почти всегда оплошность:
+    // спрашиваем, вместо того чтобы молча склеить.
+    let volume_of_file = previous.as_ref().and_then(|i| i.volume);
+    let volume_of_chapter = parsed.fields.first().and_then(|f| f.volume);
+    if let (Some(current), Some(incoming)) = (volume_of_file, volume_of_chapter) {
+        if current != incoming && !args.yes {
+            println!(
+                "Внимание: том собран как {current}, а добавляемая глава помечена томом {incoming}."
+            );
+            let answer = ask("Всё равно добавить? [y/N]: ")?;
+            if !matches!(answer.to_lowercase().as_str(), "y" | "yes" | "д" | "да") {
+                bail!("отменено");
+            }
+        }
+    }
     let label = parsed
         .fields
         .first()
