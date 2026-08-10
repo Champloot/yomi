@@ -4,6 +4,7 @@
 //! отвечает только за «взять данные из ядра и напечатать». Как только
 //! в команде появляется логика — она переезжает в `yomi-core`.
 
+mod build;
 mod config_cmd;
 mod info;
 mod library;
@@ -27,6 +28,7 @@ pub async fn dispatch(cli: &Cli) -> Result<()> {
         Command::Read(args) => read::run(&ctx, args).await,
         Command::Info(args) => info::run(args).await,
         Command::Pack(args) => pack::run(args).await,
+        Command::Build(args) => build::run(args).await,
         Command::Library(cmd) => library::run(&ctx, cmd).await,
         Command::Marks(cmd) => marks::run(cmd).await,
         Command::Config(cmd) => config_cmd::run(&ctx, cmd, cli.config.as_deref()).await,

@@ -51,6 +51,9 @@ pub enum Command {
     /// Собрать CBZ из каталога с картинками
     Pack(PackArgs),
 
+    /// Собрать том из отдельных файлов-глав, с разметкой границ
+    Build(BuildArgs),
+
     /// Отметки начала глав внутри файла
     #[command(subcommand)]
     Marks(MarksCommand),
@@ -89,6 +92,41 @@ pub struct ReadArgs {
     /// Направление чтения
     #[arg(long, value_enum)]
     pub direction: Option<DirectionArg>,
+}
+
+#[derive(Debug, Args)]
+pub struct BuildArgs {
+    /// Каталог с файлами глав (CBZ) или готовый том при использовании --add
+    #[arg(value_name = "ПУТЬ")]
+    pub path: PathBuf,
+
+    /// Дописать главу в уже собранный том
+    #[arg(long, value_name = "ФАЙЛ")]
+    pub add: Option<PathBuf>,
+
+    /// Куда сохранить том
+    #[arg(long, short = 'o', value_name = "ФАЙЛ")]
+    pub output: Option<PathBuf>,
+
+    /// Название тайтла
+    #[arg(long)]
+    pub series: Option<String>,
+
+    /// Номер тома, если его не удалось определить
+    #[arg(long)]
+    pub volume: Option<u16>,
+
+    /// Считать главы идущими подряд, начиная с этого номера
+    #[arg(long, value_name = "НОМЕР")]
+    pub start_chapter: Option<f32>,
+
+    /// Не задавать вопросов: брать то, что определилось
+    #[arg(long, short = 'y')]
+    pub yes: bool,
+
+    /// Перезаписать существующий файл
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Debug, Args)]

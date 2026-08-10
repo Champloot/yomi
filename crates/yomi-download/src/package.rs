@@ -174,6 +174,83 @@ pub fn write_cbz(target: &Path, meta: &PackMeta, mut pages: Vec<PagePayload>) ->
     Ok(())
 }
 
+/// Дописывает в `ComicInfo.xml` внутри архива блок `<Pages>` с
+/// закладками на границах глав.
+///
+/// Закладки — штатный способ отметить начало главы внутри тома, его
+/// понимают Komga, Kavita и Mihon. Благодаря им разметка перестаёт быть
+/// заперта в базе yomi и переносится вместе с файлом.
+///
+/// Архив пересобирается: ZIP не позволяет заменить запись на месте.
+pub fn add_bookmarks(archive: &Path, bookmarks: &[(u32, String)]) -> Result<()> {
+    if bookmarks.is_empty() {
+        return Ok(());
+    }
+
+    let file = std::fs::File::open(archive)?;
+    let mut zip = zip::ZipArchive::new(file)
+        .map_err(|e| Error::NotFound(format!("чтение {}: {e}", archive.display())))?;
+
+    // Читаем всё в память: тома бывают в сотни мегабайт, но потоковая
+    // пересборка потребовала бы двух проходов по архиву, а память
+    // здесь дешевле сложности.
+    let mut entries: Vec<(String, Vec<u8>)> = Vec::with_capacity(zip.len());
+    for index in 0..zip.len() {
+        let mut entry = zip
+            .by_index(index)
+            .map_err(|e| Error::NotFound(format!("запись {index}: {e}")))?;
+        let name = entry.name().to_string();
+        let mut bytes = Vec::with_capacity(entry.size() as usize);
+        std::io::Read::read_to_end(&mut entry, &mut bytes)?;
+        entries.push((name, bytes));
+    }
+
+    let mut pages_xml = String::from("  <Pages>\n");
+    for (page, title) in bookmarks {
+        pages_xml.push_str(&format!(
+            "    <Page Image=\"{page}\" Bookmark=\"{}\" Type=\"Story\" />\n",
+            escape(title)
+        ));
+    }
+    pages_xml.push_str("  </Pages>\n");
+
+    let temp = archive.with_extension("cbz.part");
+    {
+        let out = std::fs::File::create(&temp)?;
+        let mut writer = zip::ZipWriter::new(out);
+        let stored =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        let deflated = zip::write::FileOptions::default();
+
+        for (name, bytes) in &entries {
+            if name.eq_ignore_ascii_case("ComicInfo.xml") {
+                let xml = String::from_utf8_lossy(bytes);
+                // Вставляем блок перед закрывающим тегом; если файл
+                // испорчен и тега нет, оставляем его как есть.
+                let patched = match xml.rfind("</ComicInfo>") {
+                    Some(pos) => format!("{}{}{}", &xml[..pos], pages_xml, &xml[pos..]),
+                    None => xml.to_string(),
+                };
+                writer
+                    .start_file("ComicInfo.xml", deflated)
+                    .map_err(|e| Error::NotFound(format!("запись метаданных: {e}")))?;
+                writer.write_all(patched.as_bytes())?;
+            } else {
+                writer
+                    .start_file(name, stored)
+                    .map_err(|e| Error::NotFound(format!("запись {name}: {e}")))?;
+                writer.write_all(bytes)?;
+            }
+        }
+        writer
+            .finish()
+            .map_err(|e| Error::NotFound(format!("закрытие архива: {e}")))?;
+    }
+
+    std::fs::rename(&temp, archive)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

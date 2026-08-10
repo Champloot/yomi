@@ -498,3 +498,133 @@ fn clearing_removes_every_mark() {
     assert_eq!(code(&run(&dir, &["marks", "clear", path])), 0);
     assert!(stdout(&run(&dir, &["marks", "list", path])).contains("Отметок нет"));
 }
+
+#[test]
+fn build_assembles_a_volume_with_chapter_bookmarks() {
+    let dir = temp_dir("buildvol");
+    let chapters = dir.join("главы");
+    std::fs::create_dir_all(&chapters).unwrap();
+    // Имена в том же формате, что у реальных файлов.
+    make_cbz(&chapters.join("33_-_359_Первая.cbz"), 5);
+    make_cbz(&chapters.join("33_-_360_Вторая.cbz"), 4);
+    make_cbz(&chapters.join("33_-_361_Третья.cbz"), 6);
+
+    let out = dir.join("том33.cbz");
+    let result = run(
+        &dir,
+        &[
+            "build",
+            chapters.to_str().unwrap(),
+            "--series",
+            "Тайтл",
+            "-o",
+            out.to_str().unwrap(),
+            "--yes",
+        ],
+    );
+    assert_eq!(
+        code(&result),
+        0,
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(out.exists());
+
+    // Границы глав должны читаться обратно ровно там, где стыки.
+    let info = run(&dir, &["info", out.to_str().unwrap()]);
+    let text = stdout(&info);
+    assert!(text.contains("закладки ComicInfo.xml"), "{text}");
+    assert!(text.contains("Глава 359"), "{text}");
+    assert!(
+        text.contains("стр. 6–9"),
+        "вторая глава начинается с шестой страницы: {text}"
+    );
+}
+
+#[test]
+fn build_refuses_to_overwrite_without_force() {
+    let dir = temp_dir("buildforce");
+    let chapters = dir.join("главы");
+    std::fs::create_dir_all(&chapters).unwrap();
+    make_cbz(&chapters.join("1.cbz"), 3);
+
+    let out = dir.join("том.cbz");
+    let args = [
+        "build",
+        chapters.to_str().unwrap(),
+        "--series",
+        "Т",
+        "-o",
+        out.to_str().unwrap(),
+        "--yes",
+    ];
+    assert_eq!(code(&run(&dir, &args)), 0);
+
+    let second = run(&dir, &args);
+    assert_ne!(
+        code(&second),
+        0,
+        "существующий том не должен затираться молча"
+    );
+    assert!(String::from_utf8_lossy(&second.stderr).contains("--force"));
+}
+
+#[test]
+fn build_needs_archives_in_the_directory() {
+    let dir = temp_dir("buildempty");
+    let empty = dir.join("пусто");
+    std::fs::create_dir_all(&empty).unwrap();
+    let out = run(&dir, &["build", empty.to_str().unwrap(), "--yes"]);
+    assert_ne!(code(&out), 0);
+}
+
+#[test]
+fn build_add_appends_a_chapter_and_keeps_previous_bookmarks() {
+    let dir = temp_dir("buildadd");
+    let chapters = dir.join("главы");
+    std::fs::create_dir_all(&chapters).unwrap();
+    make_cbz(&chapters.join("1_-_10_Первая.cbz"), 4);
+    make_cbz(&chapters.join("1_-_11_Вторая.cbz"), 4);
+
+    let out = dir.join("том.cbz");
+    run(
+        &dir,
+        &[
+            "build",
+            chapters.to_str().unwrap(),
+            "--series",
+            "Тайтл",
+            "-o",
+            out.to_str().unwrap(),
+            "--yes",
+        ],
+    );
+
+    let extra = dir.join("1_-_12_Третья.cbz");
+    make_cbz(&extra, 3);
+    let added = run(
+        &dir,
+        &[
+            "build",
+            out.to_str().unwrap(),
+            "--add",
+            extra.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(
+        code(&added),
+        0,
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+
+    let text = stdout(&run(&dir, &["info", out.to_str().unwrap()]));
+    assert!(
+        text.contains("Глава 10"),
+        "старые закладки должны уцелеть: {text}"
+    );
+    assert!(
+        text.contains("Глава 12"),
+        "новая глава должна появиться: {text}"
+    );
+}
