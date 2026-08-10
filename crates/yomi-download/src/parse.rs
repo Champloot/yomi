@@ -174,13 +174,14 @@ pub fn analyze(stems: &[String]) -> Analysis {
     if uniform && parsed.len() > 1 {
         // Ключевая эвристика: считаем, сколько различных значений
         // принимает каждая позиция. Меняется — глава, постоянна — том.
-        let mut distinct = vec![0usize; count];
-        for position in 0..count {
-            let mut values: Vec<f32> = parsed.iter().map(|p| p.numbers[position]).collect();
-            values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            values.dedup();
-            distinct[position] = values.len();
-        }
+        let distinct: Vec<usize> = (0..count)
+            .map(|position| {
+                let mut values: Vec<f32> = parsed.iter().map(|p| p.numbers[position]).collect();
+                values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                values.dedup();
+                values.len()
+            })
+            .collect();
 
         let most = distinct.iter().copied().max().unwrap_or(0);
         let least = distinct.iter().copied().min().unwrap_or(0);
