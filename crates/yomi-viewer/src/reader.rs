@@ -261,9 +261,15 @@ fn draw_page(
     };
 
     let chapter = chapter_status(marks, index);
+
+    // Про отметку напоминаем только когда том не размечен: на
+    // размеченном полезнее знать про переход между главами, а `m`
+    // пользователь и так найдёт, когда захочет поправить границу.
+    let keys = hint_keys(marks);
+
     write!(
         stdout,
-        "\r\nстраница {}/{}{}  [{hint}, m — отметить главу, q — выход]",
+        "\r\nстраница {}/{}{}  [{hint}, {keys}, q — выход]",
         index + 1,
         total,
         chapter
@@ -271,6 +277,19 @@ fn draw_page(
     .map_err(Error::Io)?;
     stdout.flush().map_err(Error::Io)?;
     Ok(())
+}
+
+/// Какие клавиши подсказывать в строке состояния.
+///
+/// Про отметку напоминаем только когда том не размечен: на размеченном
+/// полезнее знать про переход между главами, а `m` пользователь найдёт,
+/// когда захочет поправить границу.
+fn hint_keys(marks: &[u32]) -> &'static str {
+    if marks.is_empty() {
+        "m — отметить главу"
+    } else {
+        "[ ] — главы"
+    }
 }
 
 /// Описание текущей главы для строки состояния.
@@ -382,6 +401,21 @@ mod tests {
             assert_eq!(act(KeyCode::Char(']'), dir), Action::NextChapter, "{dir:?}");
             assert_eq!(act(KeyCode::Char('['), dir), Action::PrevChapter, "{dir:?}");
         }
+    }
+
+    #[test]
+    fn status_line_hint_depends_on_whether_the_volume_is_marked() {
+        // На размеченном томе полезнее знать про переход между главами,
+        // а не про то, как поставить отметку.
+        assert!(
+            hint_keys(&[]).contains('m'),
+            "неразмеченный том — подсказать отметку"
+        );
+        assert!(
+            hint_keys(&[0, 20]).contains('['),
+            "размеченный — подсказать переход"
+        );
+        assert!(!hint_keys(&[0, 20]).contains('m'));
     }
 
     #[test]

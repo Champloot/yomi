@@ -15,6 +15,19 @@ use yomi_download::parse::{self, Confidence};
 use yomi_download::write_cbz;
 use yomi_viewer::archive::PageSource;
 
+/// Подпись главы для закладки.
+///
+/// Одна на оба пути — сборку тома и дописывание главы: раньше они
+/// формировали подпись по-разному, и дописанная глава теряла название.
+fn chapter_label(number: Option<f32>, title: Option<&str>, fallback: &str) -> String {
+    match (number, title) {
+        (Some(n), Some(t)) => format!("Глава {n} — {t}"),
+        (Some(n), None) => format!("Глава {n}"),
+        (None, Some(t)) => t.to_string(),
+        (None, None) => fallback.to_string(),
+    }
+}
+
 /// Одна глава, готовая к укладке в том.
 struct Chapter {
     path: PathBuf,
@@ -301,12 +314,8 @@ fn write_volume(
 
     for chapter in chapters {
         let source = PageSource::open(&chapter.path)?;
-        let label = match (chapter.number, chapter.title.as_deref()) {
-            (Some(n), Some(t)) => format!("Глава {n} — {t}"),
-            (Some(n), None) => format!("Глава {n}"),
-            (None, Some(t)) => t.to_string(),
-            (None, None) => format!("Глава {}", bookmarks.len() + 1),
-        };
+        let fallback = format!("Глава {}", bookmarks.len() + 1);
+        let label = chapter_label(chapter.number, chapter.title.as_deref(), &fallback);
         bookmarks.push((index, label));
 
         for page in 0..source.page_count() {
@@ -413,12 +422,13 @@ fn add_to_volume(volume_path: &Path, chapter_path: &Path, args: &BuildArgs) -> R
             }
         }
     }
-    let label = parsed
-        .fields
-        .first()
-        .and_then(|f| f.chapter)
-        .map(|n| format!("Глава {n}"))
-        .unwrap_or(stem);
+    // Название из имени файла нужно здесь ровно так же, как при сборке
+    // тома: иначе дописанная глава остаётся безымянной, хотя в имени
+    // файла название есть.
+    let label = match parsed.fields.first() {
+        Some(fields) => chapter_label(fields.chapter, fields.title.as_deref(), &stem),
+        None => stem,
+    };
     bookmarks.push((existing.page_count() as u32, label));
 
     let meta = PackMeta {
