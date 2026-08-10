@@ -36,10 +36,6 @@ pub struct Cli {
     #[arg(long, short = 'q', global = true, conflicts_with = "verbose")]
     pub quiet: bool,
 
-    /// Машиночитаемый вывод JSON вместо таблиц
-    #[arg(long, global = true)]
-    pub json: bool,
-
     #[command(subcommand)]
     pub command: Command,
 }

@@ -17,15 +17,11 @@ use anyhow::Result;
 /// Контекст выполнения: то, что нужно почти каждой команде.
 pub struct Ctx {
     pub config: yomi_core::config::Config,
-    pub json: bool,
 }
 
 pub async fn dispatch(cli: &Cli) -> Result<()> {
     let config = yomi_core::config::Config::load(cli.config.as_deref())?;
-    let ctx = Ctx {
-        config,
-        json: cli.json,
-    };
+    let ctx = Ctx { config };
 
     match &cli.command {
         Command::Read(args) => read::run(&ctx, args).await,
