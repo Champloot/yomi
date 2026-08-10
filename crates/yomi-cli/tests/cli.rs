@@ -376,3 +376,10 @@ fn chapters_of_unknown_title_is_not_found() {
     let out = run(&dir, &["library", "chapters", "999"]);
     assert_eq!(code(&out), 4, "несуществующий тайтл — код «не найдено»");
 }
+
+#[test]
+fn manga_command_requires_a_working_source() {
+    let dir = temp_dir("mangabadsource");
+    let out = run(&dir, &["manga", "any-id", "-s", "no-such-source"]);
+    assert_eq!(code(&out), 4);
+}

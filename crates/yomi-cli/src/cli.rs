@@ -61,6 +61,10 @@ pub enum Command {
     /// Скачать главы
     Download(DownloadArgs),
 
+    /// Подробности о тайтле в источнике: сколько глав и сколько из них
+    /// реально доступно для скачивания
+    Manga(MangaArgs),
+
     /// Источники манги
     #[command(subcommand)]
     Sources(SourcesCommand),
@@ -192,6 +196,16 @@ pub struct DownloadArgs {
     /// Каталог назначения
     #[arg(long, short = 'o', value_name = "КАТАЛОГ")]
     pub output: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct MangaArgs {
+    /// Идентификатор тайтла в источнике
+    #[arg(value_name = "ID")]
+    pub manga_id: String,
+
+    #[arg(long, short = 's', default_value = "mangadex")]
+    pub source: String,
 }
 
 #[derive(Debug, Subcommand)]

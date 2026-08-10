@@ -8,6 +8,7 @@ mod config_cmd;
 mod download;
 mod info;
 mod library;
+mod manga;
 mod read;
 mod search;
 mod sources;
@@ -36,6 +37,7 @@ pub async fn dispatch(cli: &Cli) -> Result<()> {
         Command::Info(args) => info::run(args).await,
         Command::Library(cmd) => library::run(&ctx, cmd).await,
         Command::Search(args) => search::run(&ctx, args).await,
+        Command::Manga(args) => manga::run(&ctx, args).await,
         Command::Download(args) => download::run(&ctx, args).await,
         Command::Sources(cmd) => sources::run(&ctx, cmd).await,
         Command::Config(cmd) => config_cmd::run(&ctx, cmd, cli.config.as_deref()).await,
