@@ -20,6 +20,9 @@
 pub struct ParsedName {
     /// Числа в порядке появления.
     pub numbers: Vec<f32>,
+    /// Слово непосредственно перед каждым числом: `том`, `vol`, `гл`.
+    /// Пустая строка, если метки нет. Длина совпадает с `numbers`.
+    pub labels: Vec<String>,
     /// Текстовый хвост после последнего числа — вероятное название.
     pub title: Option<String>,
     pub raw: String,
@@ -35,6 +38,7 @@ fn is_separator_only(text: &str) -> bool {
 /// Разбирает одно имя (без расширения) на числа и текстовый хвост.
 pub fn parse_name(stem: &str) -> ParsedName {
     let mut numbers = Vec::new();
+    let mut labels: Vec<String> = Vec::new();
     let mut last_text: Option<String> = None;
     let mut seen_number = false;
 
@@ -47,7 +51,15 @@ pub fn parse_name(stem: &str) -> ParsedName {
             // Текст между числами названием не является: в
             // «Название - Том 3 - Глава 21» это слово «Глава», то есть
             // подпись к номеру, а не имя главы. Названием считаем
-            // только хвост после последнего числа.
+            // только хвост после последнего числа. Зато сама подпись
+            // ценна: она прямо говорит, что за число идёт следом.
+            let label = buffer
+                .trim_matches(|c: char| SEPARATORS.contains(&c))
+                .rsplit(|c: char| SEPARATORS.contains(&c))
+                .next()
+                .unwrap_or("")
+                .to_lowercase();
+            labels.push(label);
             buffer.clear();
             let mut digits = String::new();
             while let Some(&d) = chars.peek() {
@@ -87,10 +99,19 @@ pub fn parse_name(stem: &str) -> ParsedName {
 
     let title = last_text
         .map(|t| t.trim_matches(|c| SEPARATORS.contains(&c)).to_string())
+        // В именах файлов пробел обычно заменён подчёркиванием:
+        // «Долгое_послевкусие» читается как «Долгое послевкусие».
+        .map(|t| t.replace('_', " "))
+        .map(|t| t.split_whitespace().collect::<Vec<_>>().join(" "))
         .filter(|t| !t.is_empty());
+
+    // Метки и числа должны совпадать по длине: у первого числа метки
+    // может не быть вовсе, если имя начинается с цифры.
+    labels.resize(numbers.len(), String::new());
 
     ParsedName {
         numbers,
+        labels,
         title,
         raw: stem.to_string(),
     }
@@ -107,7 +128,10 @@ pub struct Fields {
 /// Насколько уверенно разобран набор.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Confidence {
-    /// Том и главы определены по вариативности — самый надёжный случай.
+    /// В имени есть подпись — `том`, `vol`, `гл`. Самый надёжный случай:
+    /// её поставил человек, который знал, что записывает.
+    ByLabel,
+    /// Том и главы определены по вариативности значений.
     ByVariation,
     /// Одно число на файл: считаем его главой.
     ChapterOnly,
@@ -156,7 +180,28 @@ pub fn analyze(stems: &[String]) -> Analysis {
     }
 
     if count == 1 {
-        // Единственное число — это глава: том без главы не встречается.
+        // Единственное число обычно глава, но подпись важнее догадки:
+        // в «Usogui_VOL-32» это том, и ошибиться тут значит собрать
+        // библиотеку с главой 32 вместо тома 32.
+        const VOLUME_MARKS: &[&str] = &["том", "тома", "vol", "volume", "v", "t"];
+        if parsed
+            .iter()
+            .any(|p| p.labels.first().map(|l| VOLUME_MARKS.contains(&l.as_str())) == Some(true))
+        {
+            return Analysis {
+                fields: parsed
+                    .iter()
+                    .zip(titles)
+                    .map(|(p, t)| Fields {
+                        volume: p.numbers.first().map(|n| *n as u16),
+                        chapter: None,
+                        title: t,
+                    })
+                    .collect(),
+                confidence: Confidence::ByLabel,
+            };
+        }
+
         return Analysis {
             fields: parsed
                 .iter()
@@ -168,6 +213,41 @@ pub fn analyze(stems: &[String]) -> Analysis {
                 })
                 .collect(),
             confidence: Confidence::ChapterOnly,
+        };
+    }
+
+    // Подписи перед числами достовернее любой статистики.
+    const VOLUME_WORDS: &[&str] = &["том", "тома", "vol", "volume", "v", "t"];
+    const CHAPTER_WORDS: &[&str] = &["глава", "гл", "главы", "chapter", "ch", "c"];
+
+    let volume_pos = parsed[0]
+        .labels
+        .iter()
+        .position(|l| VOLUME_WORDS.contains(&l.as_str()));
+    let chapter_pos = parsed[0]
+        .labels
+        .iter()
+        .position(|l| CHAPTER_WORDS.contains(&l.as_str()));
+
+    if volume_pos.is_some() || chapter_pos.is_some() {
+        // Если размечена только одна позиция, вторая достаётся другой роли.
+        let (v, c) = match (volume_pos, chapter_pos) {
+            (Some(v), Some(c)) => (Some(v), Some(c)),
+            (Some(v), None) => (Some(v), (0..count).find(|i| *i != v)),
+            (None, Some(c)) => ((0..count).find(|i| *i != c), Some(c)),
+            _ => (None, None),
+        };
+        return Analysis {
+            fields: parsed
+                .iter()
+                .zip(titles)
+                .map(|(p, t)| Fields {
+                    volume: v.and_then(|i| p.numbers.get(i)).map(|n| *n as u16),
+                    chapter: c.and_then(|i| p.numbers.get(i)).copied(),
+                    title: t,
+                })
+                .collect(),
+            confidence: Confidence::ByLabel,
         };
     }
 
@@ -186,9 +266,12 @@ pub fn analyze(stems: &[String]) -> Analysis {
         let most = distinct.iter().copied().max().unwrap_or(0);
         let least = distinct.iter().copied().min().unwrap_or(0);
 
-        if most > 1 && least == 1 {
+        // Позиция с наименьшим разнообразием — том, с наибольшим — глава.
+        // Требовать от тома полного постоянства нельзя: набор глав часто
+        // захватывает границу томов, как в 33_-_359 … 34_-_370.
+        if most > least {
             let chapter_pos = distinct.iter().position(|d| *d == most).unwrap();
-            let volume_pos = distinct.iter().position(|d| *d == 1).unwrap();
+            let volume_pos = distinct.iter().position(|d| *d == least).unwrap();
 
             return Analysis {
                 fields: parsed
@@ -450,6 +533,50 @@ mod tests {
     fn common_prefix_drops_latin_numbering_words() {
         let title = common_title(&names(&["Title v05 c034", "Title v05 c035"]));
         assert_eq!(title.as_deref(), Some("Title"));
+    }
+
+    #[test]
+    fn real_world_set_spanning_two_volumes() {
+        // Настоящие имена: том меняется (33, 34), но реже, чем глава.
+        // Требование полного постоянства тома здесь не сработало бы.
+        let result = analyze(&names(&[
+            "33_-_359_Долгое_послевкусие",
+            "33_-_360_Прокачка_любви",
+            "34_-_362_Бастион_заговора",
+            "34_-_370_Сила_этой_стороны",
+        ]));
+        assert_eq!(result.confidence, Confidence::ByVariation);
+        assert_eq!(result.fields[0].volume, Some(33));
+        assert_eq!(result.fields[0].chapter, Some(359.0));
+        assert_eq!(result.fields[3].volume, Some(34));
+        assert_eq!(result.fields[3].chapter, Some(370.0));
+    }
+
+    #[test]
+    fn underscores_in_titles_become_spaces() {
+        let result = analyze(&names(&["33_-_359_Долгое_послевкусие"]));
+        assert_eq!(
+            result.fields[0].title.as_deref(),
+            Some("Долгое послевкусие")
+        );
+    }
+
+    #[test]
+    fn vol_label_makes_a_lone_number_a_volume() {
+        // Без учёта подписи «VOL» это выглядело бы как глава 32.
+        let result = analyze(&names(&["Usogui_VOL-32"]));
+        assert_eq!(result.confidence, Confidence::ByLabel);
+        assert_eq!(result.fields[0].volume, Some(32));
+        assert_eq!(result.fields[0].chapter, None);
+    }
+
+    #[test]
+    fn label_beats_magnitude() {
+        // «Том 40, глава 7»: по величине том выглядел бы главой.
+        let result = analyze(&names(&["Том 40 Глава 7"]));
+        assert_eq!(result.confidence, Confidence::ByLabel);
+        assert_eq!(result.fields[0].volume, Some(40));
+        assert_eq!(result.fields[0].chapter, Some(7.0));
     }
 
     #[test]
