@@ -16,7 +16,21 @@ mod logging;
 use clap::Parser;
 use cli::Cli;
 
+/// Возвращает поведение SIGPIPE по умолчанию.
+///
+/// Rust игнорирует SIGPIPE, и печать в закрытую трубу превращается в
+/// ошибку записи, а `println!` на такой ошибке паникует. В результате
+/// обычное `yomi library list | head` падало с паникой и стек-трейсом
+/// вместо тихого завершения, как ведут себя все остальные утилиты.
+fn restore_sigpipe() {
+    // Безопасно: единственный вызов, до запуска потоков.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+}
+
 fn main() -> std::process::ExitCode {
+    restore_sigpipe();
     let cli = Cli::parse();
     logging::init(cli.verbose, cli.quiet);
 

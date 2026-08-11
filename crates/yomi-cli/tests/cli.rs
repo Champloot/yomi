@@ -628,3 +628,110 @@ fn build_add_appends_a_chapter_and_keeps_previous_bookmarks() {
         "новая глава должна появиться: {text}"
     );
 }
+
+#[test]
+fn build_add_inserts_a_chapter_by_its_number() {
+    // Пропущенная глава должна встать между соседями, а не в конец.
+    let dir = temp_dir("buildinsert");
+    let chapters = dir.join("главы");
+    std::fs::create_dir_all(&chapters).unwrap();
+    make_cbz(&chapters.join("34_-_364_Первая.cbz"), 3);
+    make_cbz(&chapters.join("34_-_366_Третья.cbz"), 4);
+
+    let out = dir.join("том34.cbz");
+    run(
+        &dir,
+        &[
+            "build",
+            chapters.to_str().unwrap(),
+            "--series",
+            "Т",
+            "-o",
+            out.to_str().unwrap(),
+            "--yes",
+        ],
+    );
+
+    let missing = dir.join("34_-_365_Вторая.cbz");
+    make_cbz(&missing, 5);
+    let added = run(
+        &dir,
+        &[
+            "build",
+            out.to_str().unwrap(),
+            "--add",
+            missing.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(
+        code(&added),
+        0,
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+
+    let text = stdout(&run(&dir, &["info", out.to_str().unwrap()]));
+    let pos364 = text.find("Глава 364").expect("364 на месте");
+    let pos365 = text.find("Глава 365").expect("365 добавлена");
+    let pos366 = text.find("Глава 366").expect("366 на месте");
+    assert!(
+        pos364 < pos365 && pos365 < pos366,
+        "порядок глав нарушен:\n{text}"
+    );
+
+    // Страницы должны быть пересчитаны: 365 начинается сразу после 364.
+    assert!(text.contains("стр. 4–8"), "границы не пересчитаны:\n{text}");
+}
+
+#[test]
+fn build_add_puts_a_later_chapter_at_the_end() {
+    let dir = temp_dir("buildappend");
+    let chapters = dir.join("главы");
+    std::fs::create_dir_all(&chapters).unwrap();
+    make_cbz(&chapters.join("34_-_364_Первая.cbz"), 3);
+
+    let out = dir.join("том.cbz");
+    run(
+        &dir,
+        &[
+            "build",
+            chapters.to_str().unwrap(),
+            "--series",
+            "Т",
+            "-o",
+            out.to_str().unwrap(),
+            "--yes",
+        ],
+    );
+
+    let later = dir.join("34_-_370_Поздняя.cbz");
+    make_cbz(&later, 2);
+    assert_eq!(
+        code(&run(
+            &dir,
+            &[
+                "build",
+                out.to_str().unwrap(),
+                "--add",
+                later.to_str().unwrap()
+            ]
+        )),
+        0
+    );
+
+    let text = stdout(&run(&dir, &["info", out.to_str().unwrap()]));
+    assert!(text.find("Глава 364") < text.find("Глава 370"), "{text}");
+}
+
+#[test]
+fn output_does_not_panic_when_the_pipe_closes() {
+    // `yomi info файл | head` не должен падать с паникой: Rust
+    // игнорирует SIGPIPE, и печать в закрытую трубу становится ошибкой.
+    let dir = temp_dir("pipe");
+    let file = dir.join("том.cbz");
+    make_cbz(&file, 3);
+
+    let out = run(&dir, &["info", file.to_str().unwrap()]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains("panicked"), "{stderr}");
+}

@@ -1228,6 +1228,7 @@ dependencies = [
  "anyhow",
  "clap",
  "image",
+ "libc",
  "tokio",
  "tracing",
  "tracing-subscriber",

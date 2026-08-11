@@ -27,6 +27,8 @@ clap.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tokio.workspace = true
+# Только ради восстановления обработки SIGPIPE по умолчанию.
+libc = "0.2"
 
 [dev-dependencies]
 zip = { version = "0.6", default-features = false, features = ["deflate"] }

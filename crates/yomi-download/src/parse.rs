@@ -324,6 +324,61 @@ pub fn analyze(stems: &[String]) -> Analysis {
     }
 }
 
+/// Разбирает **одно** имя, зная номер тома, к которому файл относится.
+///
+/// Одиночный файл разобрать труднее набора: сравнивать не с чем, и
+/// остаётся догадка по величине. Но если том известен — например, мы
+/// дописываем главу в собранный том, — совпадение одного из чисел с
+/// номером тома снимает неоднозначность полностью: раз это том, то
+/// второе число заведомо глава.
+///
+/// Именно поэтому файл нужно разбирать при каждом обращении к нему, а
+/// не полагаться на то, что он назван так же, как соседи по папке.
+pub fn analyze_one(stem: &str, known_volume: Option<u16>) -> Fields {
+    let analysis = analyze(&[stem.to_string()]);
+    let mut fields = analysis.fields.into_iter().next().unwrap_or_default();
+
+    let Some(volume) = known_volume else {
+        return fields;
+    };
+
+    let parsed = parse_name(stem);
+    // Ищем число, равное номеру тома. Если оно есть, а другое число
+    // отличается — роли распределяются однозначно.
+    let matches_volume: Vec<usize> = parsed
+        .numbers
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| **n as u16 == volume)
+        .map(|(i, _)| i)
+        .collect();
+
+    if matches_volume.len() == 1 && parsed.numbers.len() >= 2 {
+        let volume_pos = matches_volume[0];
+        if let Some((_, other)) = parsed
+            .numbers
+            .iter()
+            .enumerate()
+            .find(|(i, _)| *i != volume_pos)
+        {
+            fields.volume = Some(volume);
+            fields.chapter = Some(*other);
+        }
+    }
+
+    fields
+}
+
+/// Достаёт номер главы из подписи закладки вида «Глава 364 — Название».
+///
+/// Нужен, чтобы понять порядок глав в уже собранном томе: структурного
+/// места для номеров в `ComicInfo.xml` нет, и подпись — единственное,
+/// что о них известно.
+pub fn number_from_label(label: &str) -> Option<f32> {
+    let parsed = parse_name(label);
+    parsed.numbers.first().copied()
+}
+
 /// Общая часть имён — вероятное название тайтла.
 ///
 /// Обрезается по границе разделителей: иначе от «Название 01» и
@@ -577,6 +632,38 @@ mod tests {
         assert_eq!(result.confidence, Confidence::ByLabel);
         assert_eq!(result.fields[0].volume, Some(40));
         assert_eq!(result.fields[0].chapter, Some(7.0));
+    }
+
+    #[test]
+    fn known_volume_removes_the_ambiguity_of_a_lone_file() {
+        // Без контекста «34_-_365» разбирается догадкой по величине.
+        // Зная, что том 34, программа рассуждает уверенно.
+        let fields = analyze_one("34_-_365_Избиение", Some(34));
+        assert_eq!(fields.volume, Some(34));
+        assert_eq!(fields.chapter, Some(365.0));
+        assert_eq!(fields.title.as_deref(), Some("Избиение"));
+    }
+
+    #[test]
+    fn known_volume_works_even_when_it_is_the_larger_number() {
+        // Том 100, глава 7: по величине вышло бы наоборот.
+        let fields = analyze_one("7_-_100", Some(100));
+        assert_eq!(fields.volume, Some(100));
+        assert_eq!(fields.chapter, Some(7.0));
+    }
+
+    #[test]
+    fn unrelated_volume_does_not_break_parsing() {
+        // Номер тома не встречается в имени — работаем как обычно.
+        let fields = analyze_one("34_-_365", Some(99));
+        assert_eq!(fields.chapter, Some(365.0));
+    }
+
+    #[test]
+    fn chapter_number_is_recovered_from_a_bookmark_label() {
+        assert_eq!(number_from_label("Глава 364 — Избиение"), Some(364.0));
+        assert_eq!(number_from_label("Глава 10.5"), Some(10.5));
+        assert_eq!(number_from_label("Послесловие"), None);
     }
 
     #[test]

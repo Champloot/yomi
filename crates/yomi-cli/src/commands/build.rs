@@ -359,6 +359,42 @@ fn write_cbz_with_bookmarks(
     Ok(())
 }
 
+/// Глава внутри уже собранного тома: где начинается и чем подписана.
+struct ExistingChapter {
+    start: usize,
+    end: usize,
+    label: String,
+    number: Option<f32>,
+}
+
+/// Восстанавливает состав тома из закладок `ComicInfo.xml`.
+fn existing_chapters(
+    info: Option<&yomi_viewer::comicinfo::ComicInfo>,
+    total: usize,
+) -> Vec<ExistingChapter> {
+    let Some(info) = info else {
+        return Vec::new();
+    };
+
+    info.bookmarks
+        .iter()
+        .enumerate()
+        .map(|(index, mark)| {
+            let end = info
+                .bookmarks
+                .get(index + 1)
+                .map(|next| next.page as usize)
+                .unwrap_or(total);
+            ExistingChapter {
+                start: mark.page as usize,
+                end,
+                label: mark.title.clone(),
+                number: parse::number_from_label(&mark.title),
+            }
+        })
+        .collect()
+}
+
 fn add_to_volume(volume_path: &Path, chapter_path: &Path, args: &BuildArgs) -> Result<()> {
     if !volume_path.is_file() {
         bail!("нужен собранный том: {}", volume_path.display());
@@ -366,52 +402,22 @@ fn add_to_volume(volume_path: &Path, chapter_path: &Path, args: &BuildArgs) -> R
 
     let existing = PageSource::open(volume_path)?;
     let addition = PageSource::open(chapter_path)?;
-
-    println!(
-        "В томе {} страниц, добавляется {}",
-        existing.page_count(),
-        addition.page_count()
-    );
-
-    // Собираем заново: ZIP не умеет вставку, да и границы глав всё
-    // равно нужно пересчитать.
-    let mut pages: Vec<PagePayload> = Vec::new();
-    let mut index = 0u32;
-    for source in [&existing, &addition] {
-        for page in 0..source.page_count() {
-            let bytes = source.read_page(page)?;
-            pages.push(PagePayload {
-                index,
-                extension: detect_extension(&bytes).to_string(),
-                bytes,
-            });
-            index += 1;
-        }
-    }
-
-    // Прежние закладки сохраняем, новую ставим на стык.
     let previous = yomi_viewer::scan::read_comicinfo(volume_path);
-    let mut bookmarks: Vec<(u32, String)> = previous
-        .as_ref()
-        .map(|info| {
-            info.bookmarks
-                .iter()
-                .map(|b| (b.page, b.title.clone()))
-                .collect()
-        })
-        .unwrap_or_default();
 
+    let volume_number = args
+        .volume
+        .or_else(|| previous.as_ref().and_then(|i| i.volume));
+
+    // Файл разбираем заново, зная номер тома: соседи по папке могли
+    // называться иначе, а этот файл мог прийти откуда угодно.
     let stem = chapter_path
         .file_stem()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
-    let parsed = parse::analyze(&[stem.clone()]);
+    let fields = parse::analyze_one(&stem, volume_number);
 
-    // Глава из другого тома — не запрет, но почти всегда оплошность:
-    // спрашиваем, вместо того чтобы молча склеить.
-    let volume_of_file = previous.as_ref().and_then(|i| i.volume);
-    let volume_of_chapter = parsed.fields.first().and_then(|f| f.volume);
-    if let (Some(current), Some(incoming)) = (volume_of_file, volume_of_chapter) {
+    // Глава из другого тома — не запрет, но почти всегда оплошность.
+    if let (Some(current), Some(incoming)) = (volume_number, fields.volume) {
         if current != incoming && !args.yes {
             println!(
                 "Внимание: том собран как {current}, а добавляемая глава помечена томом {incoming}."
@@ -422,14 +428,88 @@ fn add_to_volume(volume_path: &Path, chapter_path: &Path, args: &BuildArgs) -> R
             }
         }
     }
-    // Название из имени файла нужно здесь ровно так же, как при сборке
-    // тома: иначе дописанная глава остаётся безымянной, хотя в имени
-    // файла название есть.
-    let label = match parsed.fields.first() {
-        Some(fields) => chapter_label(fields.chapter, fields.title.as_deref(), &stem),
-        None => stem,
+
+    let chapters = existing_chapters(previous.as_ref(), existing.page_count());
+    let label = chapter_label(fields.chapter, fields.title.as_deref(), &stem);
+
+    // Место вставки — по номеру главы, а не в конец: глава 365,
+    // добавленная к тому с главами 364 и 366, обязана встать между ними.
+    let position = match fields.chapter {
+        Some(number) => chapters
+            .iter()
+            .position(|c| c.number.map(|existing| existing > number).unwrap_or(false))
+            .unwrap_or(chapters.len()),
+        None => chapters.len(),
     };
-    bookmarks.push((existing.page_count() as u32, label));
+
+    if chapters.is_empty() {
+        println!(
+            "В томе нет разметки глав — дописываю в конец ({} + {} страниц)",
+            existing.page_count(),
+            addition.page_count()
+        );
+    } else if position == chapters.len() {
+        println!("Глава встанет в конец тома");
+    } else {
+        println!("Глава встанет перед «{}»", chapters[position].label);
+    }
+
+    // Собираем страницы в новом порядке. Первыми идут страницы до
+    // первой закладки: это обложка тома, к главам она не относится.
+    let leading = chapters.first().map(|c| c.start).unwrap_or(0);
+    let mut pages: Vec<PagePayload> = Vec::new();
+    let mut bookmarks: Vec<(u32, String)> = Vec::new();
+    let mut index = 0u32;
+
+    let push_page = |bytes: Vec<u8>, pages: &mut Vec<PagePayload>, index: &mut u32| {
+        pages.push(PagePayload {
+            index: *index,
+            extension: detect_extension(&bytes).to_string(),
+            bytes,
+        });
+        *index += 1;
+    };
+
+    for page in 0..leading {
+        push_page(existing.read_page(page)?, &mut pages, &mut index);
+    }
+
+    let write_addition = |pages: &mut Vec<PagePayload>,
+                          bookmarks: &mut Vec<(u32, String)>,
+                          index: &mut u32|
+     -> Result<()> {
+        bookmarks.push((*index, label.clone()));
+        for page in 0..addition.page_count() {
+            let bytes = addition.read_page(page)?;
+            pages.push(PagePayload {
+                index: *index,
+                extension: detect_extension(&bytes).to_string(),
+                bytes,
+            });
+            *index += 1;
+        }
+        Ok(())
+    };
+
+    for (order, chapter) in chapters.iter().enumerate() {
+        if order == position {
+            write_addition(&mut pages, &mut bookmarks, &mut index)?;
+        }
+        bookmarks.push((index, chapter.label.clone()));
+        for page in chapter.start..chapter.end {
+            push_page(existing.read_page(page)?, &mut pages, &mut index);
+        }
+    }
+
+    if position >= chapters.len() {
+        if chapters.is_empty() {
+            // Тома без разметки: дописываем страницы как есть.
+            for page in leading..existing.page_count() {
+                push_page(existing.read_page(page)?, &mut pages, &mut index);
+            }
+        }
+        write_addition(&mut pages, &mut bookmarks, &mut index)?;
+    }
 
     let meta = PackMeta {
         series: args
@@ -437,9 +517,7 @@ fn add_to_volume(volume_path: &Path, chapter_path: &Path, args: &BuildArgs) -> R
             .clone()
             .or_else(|| previous.as_ref().and_then(|i| i.series.clone()))
             .unwrap_or_else(|| "Без названия".to_string()),
-        volume: args
-            .volume
-            .or_else(|| previous.as_ref().and_then(|i| i.volume)),
+        volume: volume_number,
         origin: Some("собрано yomi".to_string()),
         ..Default::default()
     };
