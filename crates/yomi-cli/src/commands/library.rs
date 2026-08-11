@@ -27,9 +27,22 @@ fn open_store() -> Result<Store> {
 ///
 /// Два почти одинаковых типа существуют намеренно: `yomi-viewer` не
 /// должен зависеть от хранилища, а `yomi-db` — от разбора архивов.
+/// Приводит путь к канонической форме.
+///
+/// Записи библиотеки опознаются по пути, поэтому форма записи важна:
+/// если сканировать относительным путём, а читать абсолютным, файл
+/// не найдётся и прогресс потеряется. Канонизация с обеих сторон
+/// убирает этот класс расхождений — вместе с симлинками и `./`.
+pub fn canonical(path: &std::path::Path) -> String {
+    path.canonicalize()
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .to_string()
+}
+
 fn to_db(found: yomi_viewer::scan::ScannedManga) -> ScannedManga {
     ScannedManga {
-        external_id: found.path.to_string_lossy().to_string(),
+        external_id: canonical(&found.path),
         title: found.title,
         authors: found.authors,
         genres: found.genres,
@@ -40,7 +53,7 @@ fn to_db(found: yomi_viewer::scan::ScannedManga) -> ScannedManga {
             .chapters
             .into_iter()
             .map(|c| ScannedChapter {
-                external_id: c.path.to_string_lossy().to_string(),
+                external_id: canonical(&c.path),
                 number: c.number,
                 volume: c.volume,
                 title: c.title,

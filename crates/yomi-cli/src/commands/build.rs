@@ -10,6 +10,7 @@ use crate::cli::BuildArgs;
 use anyhow::{bail, Context, Result};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use yomi_download::naming;
 use yomi_download::package::{detect_extension, PackMeta, PagePayload};
 use yomi_download::parse::{self, Confidence};
 use yomi_download::write_cbz;
@@ -140,7 +141,9 @@ fn build_volume(dir: &Path, args: &BuildArgs) -> Result<()> {
         return build_many(dir, &files, &all_stems, &grouping, args);
     }
 
-    build_single(dir, files, args)
+    build_single(dir, files, args)?;
+    println!("\n{BOOKMARKS_NOTE}");
+    Ok(())
 }
 
 /// Собирает несколько томов из одного каталога.
@@ -168,38 +171,70 @@ fn build_many(
         }
     }
 
-    if !grouping.confident {
-        // Оценки разбиений оказались близки: угадывать молча нечестно.
+    // Подтверждение спрашиваем только когда есть в чём сомневаться.
+    // Лишний вопрос после уже отвеченного про название раздражает и,
+    // что хуже, приучает жать Enter не глядя.
+    if !grouping.confident && !args.yes {
         println!(
             "\nРазбиение неоднозначно: числа в именах можно прочесть\n\
              и как «том — глава», и наоборот. Проверьте группы выше."
         );
-    }
-
-    // Название спрашиваем один раз на весь каталог, а не по тому:
-    // внутри пакетной сборки вопросы отключены, и без этого файлы
-    // вышли бы с именем «Без названия_Vol_21.cbz».
-    let mut fallback_series = args.series.clone();
-    if fallback_series.is_none() && !args.yes && grouping.groups.iter().any(|g| g.series.is_none())
-    {
-        let answer = ask("\nНазвание тайтла для групп без названия [Enter — пропустить]: ")?;
-        if !answer.is_empty() {
-            fallback_series = Some(answer);
-        }
-    }
-
-    if !args.yes {
-        let answer = ask("\nСобрать все тома? [Y/n]: ")?;
-        if matches!(answer.to_lowercase().as_str(), "n" | "н" | "no" | "нет") {
+        let answer = ask("Собрать так? [y/N]: ")?;
+        if !matches!(answer.to_lowercase().as_str(), "y" | "yes" | "д" | "да") {
             bail!("отменено");
         }
     }
 
-    for group in &grouping.groups {
+    // Название спрашиваем по каждой группе: в каталоге могут лежать
+    // разные произведения, и одно имя на всех подошло бы не всегда.
+    // Первым ответом можно накрыть остальные — когда тайтл всё же один.
+    let mut names: Vec<Option<String>> = grouping
+        .groups
+        .iter()
+        .map(|g| args.series.clone().or_else(|| g.series.clone()))
+        .collect();
+
+    if !args.yes {
+        let mut apply_to_all: Option<String> = None;
+
+        for index in 0..grouping.groups.len() {
+            if names[index].is_some() {
+                continue;
+            }
+            if let Some(name) = &apply_to_all {
+                names[index] = Some(name.clone());
+                continue;
+            }
+
+            let group = &grouping.groups[index];
+            let volume = group
+                .volume
+                .map(|v| format!("том {v}"))
+                .unwrap_or_else(|| "том не определён".to_string());
+            let answer = ask(&format!(
+                "Название тайтла для группы «{volume}, файлов {}»: ",
+                group.files.len()
+            ))?;
+            if answer.is_empty() {
+                continue;
+            }
+            names[index] = Some(answer.clone());
+
+            let remaining = names[index + 1..].iter().filter(|n| n.is_none()).count();
+            if remaining > 0 {
+                let same = ask(&format!("Остальные {remaining} — то же название? [y/N]: "))?;
+                if matches!(same.to_lowercase().as_str(), "y" | "yes" | "д" | "да") {
+                    apply_to_all = Some(answer);
+                }
+            }
+        }
+    }
+
+    for (order, group) in grouping.groups.iter().enumerate() {
         let group_files: Vec<PathBuf> = group.files.iter().map(|i| files[*i].clone()).collect();
         let mut group_args = clone_args(args);
         group_args.volume = args.volume.or(group.volume);
-        group_args.series = group.series.clone().or_else(|| fallback_series.clone());
+        group_args.series = names[order].clone();
         // Внутри пакетной сборки вопросов уже не задаём: состав
         // подтверждён целиком, переспрашивать по каждому тому назойливо.
         group_args.yes = true;
@@ -208,8 +243,14 @@ fn build_many(
         build_single(dir, group_files, &group_args)?;
     }
 
+    println!("\n{BOOKMARKS_NOTE}");
     Ok(())
 }
+
+/// Пояснение печатается один раз за запуск, а не после каждого тома:
+/// повторённое пять раз подряд оно превращается в шум.
+const BOOKMARKS_NOTE: &str =
+    "Границы глав записаны закладками — их поймут и Komga, и Kavita, и Mihon.";
 
 /// Копия аргументов: `BuildArgs` не `Clone`, а менять исходные нельзя.
 fn clone_args(args: &BuildArgs) -> BuildArgs {
@@ -285,14 +326,18 @@ fn build_single(dir: &Path, files: Vec<PathBuf>, args: &BuildArgs) -> Result<()>
     let target = match &args.output {
         Some(path) => path.clone(),
         None => {
-            // Латиница в имени файла намеренно: кириллица в путях
-            // переживает не всякую синхронизацию, архиватор и файловую
-            // систему, а «Vol» понимают и Komga с Kavita.
+            // Латиница в «Vol» намеренно: её понимают и Komga с Kavita,
+            // а имя остаётся читаемым.
             let name = match volume {
                 Some(v) => format!("{series}_Vol_{v:02}.cbz"),
                 None => format!("{series}.cbz"),
             };
-            dir.parent().unwrap_or(dir).join(name)
+            // Складываем в подкаталог по названию, внутри исходного:
+            // так получается раскладка, которую ожидает library scan,
+            // и результат не смешивается с исходными файлами. Раньше
+            // тома уезжали в родительский каталог — то есть в домашний,
+            // если главы лежали прямо в ~/manga.
+            dir.join(naming::sanitize(&series)).join(name)
         }
     };
 
@@ -445,7 +490,6 @@ fn write_volume(
 
     println!("\nГотово: {}", target.display());
     println!("Глав: {}, страниц: {}", chapters.len(), index);
-    println!("Границы глав записаны закладками — их поймут и Komga, и Kavita, и Mihon.");
     Ok(())
 }
 

@@ -760,17 +760,13 @@ fn build_splits_a_mixed_directory_into_volumes() {
 
     let text = stdout(&out);
     assert!(text.contains("найдено групп: 2"), "{text}");
-    assert!(
-        dir.join("Т_Vol_21.cbz").exists(),
-        "том 21 должен собраться отдельно"
-    );
-    assert!(dir.join("Т_Vol_22.cbz").exists(), "том 22 тоже");
+    // Тома складываются в подкаталог по названию тайтла.
+    let vol21 = mixed.join("Т").join("Т_Vol_21.cbz");
+    assert!(vol21.exists(), "том 21 должен собраться отдельно");
+    assert!(mixed.join("Т").join("Т_Vol_22.cbz").exists(), "том 22 тоже");
 
     // В томе 21 должно быть три главы, а не все четыре файла.
-    let info = stdout(&run(
-        &dir,
-        &["info", dir.join("Т_Vol_21.cbz").to_str().unwrap()],
-    ));
+    let info = stdout(&run(&dir, &["info", vol21.to_str().unwrap()]));
     assert!(
         info.contains("Глава 12") && info.contains("Глава 14"),
         "{info}"
@@ -844,4 +840,103 @@ fn manpage_is_generated() {
         &text[..80.min(text.len())]
     );
     assert!(text.contains("SH NAME"));
+}
+
+#[test]
+fn built_volumes_go_into_a_series_subdirectory() {
+    // Раньше тома уезжали в родительский каталог — то есть в домашний,
+    // если главы лежали прямо в ~/manga.
+    let dir = temp_dir("buildlayout");
+    let manga = dir.join("manga");
+    std::fs::create_dir_all(&manga).unwrap();
+    make_cbz(&manga.join("33_-_359_Первая.cbz"), 3);
+    make_cbz(&manga.join("33_-_360_Вторая.cbz"), 3);
+
+    let out = run(
+        &dir,
+        &[
+            "build",
+            manga.to_str().unwrap(),
+            "--series",
+            "Тайтл",
+            "--yes",
+        ],
+    );
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+
+    assert!(
+        manga.join("Тайтл").join("Тайтл_Vol_33.cbz").exists(),
+        "том должен лечь в подкаталог тайтла"
+    );
+    assert!(
+        !dir.join("Тайтл_Vol_33.cbz").exists(),
+        "и не выше исходного каталога"
+    );
+}
+
+#[test]
+fn bookmarks_note_is_printed_once_per_run() {
+    let dir = temp_dir("buildnote");
+    let manga = dir.join("manga");
+    std::fs::create_dir_all(&manga).unwrap();
+    for name in ["33_-_1_А.cbz", "33_-_2_Б.cbz", "34_-_3_В.cbz"] {
+        make_cbz(&manga.join(name), 2);
+    }
+
+    let out = run(
+        &dir,
+        &["build", manga.to_str().unwrap(), "--series", "Т", "--yes"],
+    );
+    let text = stdout(&out);
+    assert_eq!(
+        text.matches("поймут и Komga").count(),
+        1,
+        "пояснение повторяется для каждого тома:\n{text}"
+    );
+}
+
+#[test]
+fn reading_a_file_outside_the_library_warns_about_progress() {
+    let dir = temp_dir("readwarn");
+    let file = dir.join("том.cbz");
+    make_cbz(&file, 3);
+
+    let out = run(&dir, &["read", file.to_str().unwrap()]);
+    // Читалке нужен терминал, поэтому она завершится ошибкой, но
+    // предупреждение должно успеть напечататься.
+    assert!(
+        stdout(&out).contains("прогресс чтения сохранён не будет"),
+        "нет предупреждения: {}",
+        stdout(&out)
+    );
+}
+
+#[test]
+fn library_stores_absolute_paths_even_when_scanned_relatively() {
+    // Иначе прогресс не найдётся при чтении абсолютным путём.
+    let dir = temp_dir("libpaths");
+    let manga = dir.join("manga").join("Тайтл");
+    std::fs::create_dir_all(&manga).unwrap();
+    make_cbz(&manga.join("том1.cbz"), 2);
+
+    let out = std::process::Command::new(BIN)
+        .args(["library", "scan", "manga"])
+        .current_dir(&dir)
+        .env("YOMI_CONFIG_DIR", dir.join("config"))
+        .env("YOMI_DATA_DIR", dir.join("data"))
+        .env("YOMI_CACHE_DIR", dir.join("cache"))
+        .env_remove("YOMI_LOG")
+        .output()
+        .expect("запуск бинарника yomi");
+    assert_eq!(out.status.code(), Some(0));
+
+    let listed = run(&dir, &["library", "chapters", "1"]);
+    let text = stdout(&listed);
+    // Путь должен начинаться от корня, а не от каталога запуска.
+    let expected = dir.join("manga").join("Тайтл").join("том1.cbz");
+    assert!(
+        text.contains(&expected.to_string_lossy().to_string()),
+        "ожидался абсолютный путь {}:\n{text}",
+        expected.display()
+    );
 }

@@ -52,6 +52,17 @@ ldd target/x86_64-unknown-linux-musl/release/yomi   # not a dynamic executable
 На NixOS для этого удобнее `nix develop` с добавленным `pkgsStatic`,
 либо просто довериться CI.
 
+## Установка автодополнения вручную
+
+```bash
+mkdir -p ~/.local/share/bash-completion/completions ~/.local/share/man/man1
+yomi generate completions bash > ~/.local/share/bash-completion/completions/yomi
+yomi generate manpage > ~/.local/share/man/man1/yomi.1
+```
+
+Перенаправление вывода не создаёт каталоги само — без `mkdir -p`
+оболочка скажет «No such file or directory».
+
 ## Нумерация версий
 
 Пока версия младше 1.0, ломающие изменения допустимы в минорной версии,

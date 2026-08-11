@@ -157,6 +157,20 @@ pub async fn run(ctx: &Ctx, args: &ReadArgs) -> Result<()> {
         use yomi_viewer::reader::ChapterMarks as _;
         let count = marks.pages().len();
         let editable = known_chapter.is_some();
+
+        // Прогресс хранится в библиотеке. Молчать об этом нельзя:
+        // пользователь дочитает до середины, вернётся и обнаружит,
+        // что чтение начинается сначала.
+        if !editable {
+            println!(
+                "Файла нет в библиотеке — прогресс чтения сохранён не будет.\n\
+                 Добавить: yomi library scan {}",
+                args.path
+                    .parent()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| ".".to_string())
+            );
+        }
         tracing::info!(chapters = count, editable, "разметка глав");
         if count > 0 && !editable {
             println!(

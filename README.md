@@ -34,9 +34,13 @@ cargo build --release
 Автодополнение и man-страница генерируются самим бинарником:
 
 ```bash
+mkdir -p ~/.local/share/bash-completion/completions ~/.local/share/man/man1
 yomi generate completions bash > ~/.local/share/bash-completion/completions/yomi
 yomi generate manpage > ~/.local/share/man/man1/yomi.1
 ```
+
+Каталоги может потребоваться создать: перенаправление вывода само их
+не создаёт.
 
 ## Что умеет
 
