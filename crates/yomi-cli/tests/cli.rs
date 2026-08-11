@@ -817,3 +817,31 @@ fn single_volume_directory_is_not_treated_as_groups() {
         "один том — без разговоров о группах"
     );
 }
+
+#[test]
+fn completions_are_generated_for_every_supported_shell() {
+    let dir = temp_dir("completions");
+    for shell in ["bash", "zsh", "fish"] {
+        let out = run(&dir, &["generate", "completions", shell]);
+        assert_eq!(code(&out), 0, "оболочка {shell}");
+        let text = stdout(&out);
+        assert!(text.contains("yomi"), "пустое автодополнение для {shell}");
+        // Команды должны попадать в автодополнение автоматически:
+        // они берутся из того же описания, что разбирает аргументы.
+        assert!(text.contains("build"), "нет команды build для {shell}");
+    }
+}
+
+#[test]
+fn manpage_is_generated() {
+    let dir = temp_dir("manpage");
+    let out = run(&dir, &["generate", "manpage"]);
+    assert_eq!(code(&out), 0);
+    let text = stdout(&out);
+    assert!(
+        text.contains(".TH yomi 1"),
+        "не похоже на roff: {}",
+        &text[..80.min(text.len())]
+    );
+    assert!(text.contains("SH NAME"));
+}

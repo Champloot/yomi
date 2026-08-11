@@ -9,17 +9,34 @@
 
 ## Установка
 
-Готовых сборок пока нет:
+Готовый бинарник со [страницы релизов](https://github.com/Champloot/yomi/releases)
+— статический, работает на любом дистрибутиве, ничего доустанавливать
+не нужно:
+
+```bash
+tar -xzf yomi-*-x86_64-unknown-linux-musl.tar.gz
+cd yomi-*-x86_64-unknown-linux-musl
+./yomi --version
+sudo install -m755 yomi /usr/local/bin/
+```
+
+Из исходников:
 
 ```bash
 git clone https://github.com/Champloot/yomi.git
 cd yomi
 cargo build --release
-./target/release/yomi --help
 ```
 
 Нужен Rust 1.75 или новее. На NixOS достаточно `nix develop` —
 подробности в [docs/nixos.md](docs/nixos.md).
+
+Автодополнение и man-страница генерируются самим бинарником:
+
+```bash
+yomi generate completions bash > ~/.local/share/bash-completion/completions/yomi
+yomi generate manpage > ~/.local/share/man/man1/yomi.1
+```
 
 ## Что умеет
 

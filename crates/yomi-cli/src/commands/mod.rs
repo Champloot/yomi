@@ -6,6 +6,7 @@
 
 mod build;
 mod config_cmd;
+mod generate;
 mod info;
 mod library;
 mod marks;
@@ -32,5 +33,6 @@ pub async fn dispatch(cli: &Cli) -> Result<()> {
         Command::Library(cmd) => library::run(&ctx, cmd).await,
         Command::Marks(cmd) => marks::run(cmd).await,
         Command::Config(cmd) => config_cmd::run(&ctx, cmd, cli.config.as_deref()).await,
+        Command::Generate(cmd) => generate::run(cmd).await,
     }
 }

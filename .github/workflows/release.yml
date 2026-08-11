@@ -1,0 +1,112 @@
+name: Release
+
+# Запускается по тегу вида v0.1.0. Собирает статические бинарники и
+# прикладывает их к релизу на GitHub.
+on:
+  push:
+    tags: ["v*"]
+  # Ручной запуск — чтобы проверить сборку, не создавая тега.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            packages: musl-tools
+          - target: aarch64-unknown-linux-musl
+            packages: gcc-aarch64-linux-gnu musl-tools
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Установка Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Системные пакеты
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.packages }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # musl вместо glibc принципиален: бинарник, собранный против
+      # системной glibc (тем более из /nix/store), не запустится на
+      # чужом дистрибутиве. Статическая сборка снимает вопрос
+      # совместимости целиком.
+      - name: Сборка
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_musl: aarch64-linux-gnu-gcc
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Проверка, что бинарник статический
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          file target/${{ matrix.target }}/release/yomi
+          # Динамические зависимости у статической сборки отсутствуют:
+          # ldd должен сказать «not a dynamic executable».
+          ldd target/${{ matrix.target }}/release/yomi 2>&1 | tee /tmp/ldd.txt
+          grep -qi "not a dynamic" /tmp/ldd.txt
+
+      - name: Проверка запуска
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: target/${{ matrix.target }}/release/yomi --version
+
+      - name: Сборка архива
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          [ -n "$version" ] || version="dev"
+          name="yomi-${version}-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+
+          cp target/${{ matrix.target }}/release/yomi "dist/$name/"
+          cp README.md LICENSE CHANGELOG.md "dist/$name/"
+
+          # Автодополнение и man генерируются самим бинарником, поэтому
+          # не могут разойтись со справкой. Для aarch64 берём хостовую
+          # сборку: запускать чужую архитектуру здесь нечем.
+          cargo build --release --locked
+          mkdir -p "dist/$name/completions"
+          for shell in bash zsh fish; do
+            ./target/release/yomi generate completions "$shell" \
+              > "dist/$name/completions/yomi.$shell"
+          done
+          ./target/release/yomi generate manpage > "dist/$name/yomi.1"
+
+          tar -czf "dist/${name}.tar.gz" -C dist "$name"
+          sha256sum "dist/${name}.tar.gz" > "dist/${name}.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*.tar.gz*
+
+  publish:
+    name: Публикация релиза
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Создание релиза
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          draft: true
+          generate_release_notes: true

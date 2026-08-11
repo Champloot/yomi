@@ -1,7 +1,7 @@
 # Обёртки над cargo для частых операций.
 # Ничего волшебного: любую цель можно выполнить руками.
 
-.PHONY: help build release test fmt lint check run clean install doc audit
+.PHONY: help build release test fmt lint check run clean install doc audit musl completions
 
 help:  ## Показать эту справку
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -39,5 +39,17 @@ install:  ## Установить в ~/.cargo/bin
 watch:  ## Пересобирать и прогонять тесты при каждой правке
 	cargo watch -x test
 
-audit:  ## Проверить зависимости на известные уязвимости
-	cargo audit
+audit:  ## Проверить зависимости на уязвимости и лицензии
+	cargo deny check
+
+musl:  ## Статическая сборка под musl — работает на любом дистрибутиве
+	cargo build --release --locked --target x86_64-unknown-linux-musl
+	@ldd target/x86_64-unknown-linux-musl/release/yomi 2>&1 | head -1
+
+completions:  ## Сгенерировать автодополнение и man-страницу в dist/
+	@mkdir -p dist/completions
+	cargo run --quiet -- generate completions bash > dist/completions/yomi.bash
+	cargo run --quiet -- generate completions zsh  > dist/completions/yomi.zsh
+	cargo run --quiet -- generate completions fish > dist/completions/yomi.fish
+	cargo run --quiet -- generate manpage > dist/yomi.1
+	@echo "готово: dist/"

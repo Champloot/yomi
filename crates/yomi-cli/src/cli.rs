@@ -65,6 +65,10 @@ pub enum Command {
     /// Конфигурация
     #[command(subcommand)]
     Config(ConfigCommand),
+
+    /// Сгенерировать автодополнение или man-страницу
+    #[command(subcommand)]
+    Generate(GenerateCommand),
 }
 
 #[derive(Debug, Args)]
@@ -200,6 +204,18 @@ pub enum LibraryCommand {
         #[arg(long, short = 'f')]
         filter: Option<String>,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum GenerateCommand {
+    /// Автодополнение для оболочки — вывод в stdout
+    Completions {
+        /// Оболочка
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
+    /// man-страница в формате roff — вывод в stdout
+    Manpage,
 }
 
 #[derive(Debug, Subcommand)]
