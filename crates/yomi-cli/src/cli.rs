@@ -58,9 +58,9 @@ pub enum Command {
     #[command(subcommand)]
     Marks(MarksCommand),
 
-    /// Локальная библиотека
-    #[command(subcommand)]
-    Library(LibraryCommand),
+    /// Локальная библиотека: без аргументов — что отслеживается,
+    /// с названием — тома этого тайтла
+    Library(LibraryArgs),
 
     /// Конфигурация
     #[command(subcommand)]
@@ -73,9 +73,10 @@ pub enum Command {
 
 #[derive(Debug, Args)]
 pub struct ReadArgs {
-    /// Путь к CBZ-архиву или каталогу с изображениями
-    #[arg(value_name = "ПУТЬ")]
-    pub path: PathBuf,
+    /// Путь к файлу или название тайтла из библиотеки.
+    /// По названию открывается то, на чём остановились
+    #[arg(value_name = "ПУТЬ_ИЛИ_НАЗВАНИЕ")]
+    pub target: String,
 
     /// Начать с указанной страницы (нумерация с единицы)
     #[arg(long, short = 'p', default_value_t = 1)]
@@ -176,6 +177,17 @@ pub struct InfoArgs {
     pub deep: bool,
 }
 
+#[derive(Debug, Args)]
+#[command(args_conflicts_with_subcommands = true)]
+pub struct LibraryArgs {
+    /// Название тайтла: показать его тома
+    #[arg(value_name = "НАЗВАНИЕ")]
+    pub title: Option<String>,
+
+    #[command(subcommand)]
+    pub command: Option<LibraryCommand>,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum LibraryCommand {
     /// Просканировать каталоги и обновить базу
@@ -184,25 +196,11 @@ pub enum LibraryCommand {
         #[arg(value_name = "КАТАЛОГ")]
         paths: Vec<PathBuf>,
     },
-    /// Продолжить чтение с того места, где остановились
-    Resume,
-    /// Показать главы тайтла (идентификатор берётся из `library list`)
-    Chapters {
-        /// Идентификатор тайтла
-        #[arg(value_name = "ID")]
-        manga_id: i64,
-    },
     /// Убрать из библиотеки записи, файлов которых больше нет
     Clean {
         /// Действительно удалить. Без этого флага только показывает список
         #[arg(long)]
         yes: bool,
-    },
-    /// Показать содержимое библиотеки
-    List {
-        /// Фильтр по названию
-        #[arg(long, short = 'f')]
-        filter: Option<String>,
     },
 }
 
@@ -356,7 +354,7 @@ mod tests {
         match cli.command {
             Command::Read(a) => {
                 assert_eq!(a.page, 7);
-                assert_eq!(a.path, PathBuf::from("/tmp/x.cbz"));
+                assert_eq!(a.target, "/tmp/x.cbz");
             }
             _ => panic!("ожидалась команда read"),
         }

@@ -1,18 +1,17 @@
-//! `yomi library` — локальная библиотека. Этап M2.
+//! `yomi library` — что отслеживается и на чём остановились.
 
 use super::Ctx;
-use crate::cli::LibraryCommand;
+use crate::cli::{LibraryArgs, LibraryCommand};
 use anyhow::{bail, Context, Result};
 use yomi_db::model::{ScannedChapter, ScannedManga};
 use yomi_db::Store;
 
-pub async fn run(ctx: &Ctx, cmd: &LibraryCommand) -> Result<()> {
-    match cmd {
-        LibraryCommand::Scan { paths } => scan(ctx, paths),
-        LibraryCommand::List { filter } => list(filter.as_deref()),
-        LibraryCommand::Resume => resume(),
-        LibraryCommand::Chapters { manga_id } => chapters(*manga_id),
-        LibraryCommand::Clean { yes } => clean(*yes),
+pub async fn run(ctx: &Ctx, args: &LibraryArgs) -> Result<()> {
+    match (&args.command, &args.title) {
+        (Some(LibraryCommand::Scan { paths }), _) => scan(ctx, paths),
+        (Some(LibraryCommand::Clean { yes }), _) => clean(*yes),
+        (None, Some(title)) => show(title),
+        (None, None) => overview(),
     }
 }
 
@@ -23,16 +22,11 @@ fn open_store() -> Result<Store> {
         .map_err(Into::into)
 }
 
-/// Переводит находку сканера в запись библиотеки.
-///
-/// Два почти одинаковых типа существуют намеренно: `yomi-viewer` не
-/// должен зависеть от хранилища, а `yomi-db` — от разбора архивов.
 /// Приводит путь к канонической форме.
 ///
 /// Записи библиотеки опознаются по пути, поэтому форма записи важна:
 /// если сканировать относительным путём, а читать абсолютным, файл
-/// не найдётся и прогресс потеряется. Канонизация с обеих сторон
-/// убирает этот класс расхождений — вместе с симлинками и `./`.
+/// не найдётся и прогресс потеряется.
 pub fn canonical(path: &std::path::Path) -> String {
     path.canonicalize()
         .unwrap_or_else(|_| path.to_path_buf())
@@ -60,8 +54,6 @@ fn to_db(found: yomi_viewer::scan::ScannedManga) -> ScannedManga {
                 language: c.language,
                 scanlator: c.scanlator,
                 page_count: c.page_count,
-                // В базе тип хранится строкой: перечисление живёт
-                // в yomi-viewer, а зависеть от него хранилищу незачем.
                 kind: match c.kind {
                     yomi_viewer::structure::FileKind::Chapter => "chapter",
                     yomi_viewer::structure::FileKind::Volume => "volume",
@@ -75,7 +67,6 @@ fn to_db(found: yomi_viewer::scan::ScannedManga) -> ScannedManga {
 }
 
 fn scan(ctx: &Ctx, paths: &[std::path::PathBuf]) -> Result<()> {
-    // Аргументы командной строки важнее конфига.
     let targets = if paths.is_empty() {
         ctx.config.library.paths.clone()
     } else {
@@ -90,8 +81,7 @@ fn scan(ctx: &Ctx, paths: &[std::path::PathBuf]) -> Result<()> {
     }
 
     let mut store = open_store()?;
-    let mut total_manga = 0usize;
-    let mut total_chapters = 0usize;
+    let (mut total_manga, mut total_chapters) = (0usize, 0usize);
 
     for target in &targets {
         if !target.exists() {
@@ -107,7 +97,7 @@ fn scan(ctx: &Ctx, paths: &[std::path::PathBuf]) -> Result<()> {
             store
                 .upsert_scanned(&record)
                 .with_context(|| format!("запись тайтла «{title}»"))?;
-            println!("{title} — глав: {chapters}");
+            println!("{title} — файлов: {chapters}");
             total_manga += 1;
             total_chapters += chapters;
         }
@@ -117,127 +107,122 @@ fn scan(ctx: &Ctx, paths: &[std::path::PathBuf]) -> Result<()> {
         println!("Ничего не найдено. Ожидается раскладка: КАТАЛОГ/Тайтл/Том 1.cbz");
         return Ok(());
     }
-    println!("\nВ библиотеке: тайтлов {total_manga}, глав {total_chapters}");
+    println!("\nВ библиотеке: тайтлов {total_manga}, файлов {total_chapters}");
     Ok(())
 }
 
-fn list(filter: Option<&str>) -> Result<()> {
+/// `yomi library` — что отслеживается.
+///
+/// Показывает не перечень файлов, а состояние: тайтл, диапазон томов и
+/// на чём читатель остановился. Перечислять файлы здесь бессмысленно —
+/// для этого есть показ по названию.
+fn overview() -> Result<()> {
     let store = open_store()?;
-    let items = store.list_manga(filter)?;
+    let items = store.list_manga(None)?;
 
     if items.is_empty() {
-        if store.manga_count()? == 0 {
-            println!("Библиотека пуста. Заполните её командой `yomi library scan КАТАЛОГ`.");
-        } else {
-            println!("По фильтру ничего не найдено.");
-        }
+        println!("Библиотека пуста. Заполните её командой `yomi library scan КАТАЛОГ`.");
         return Ok(());
     }
+
+    let mut missing = 0usize;
 
     for manga in &items {
         let chapters = store.chapters_of(manga.id)?;
-        // Считаем прочитанное, чтобы список показывал прогресс,
-        // а не просто перечислял тайтлы.
-        let mut completed = 0usize;
-        for chapter in &chapters {
-            if store
-                .progress_of(chapter.id)?
-                .map(|p| p.completed)
-                .unwrap_or(false)
-            {
-                completed += 1;
-            }
-        }
-        let authors = if manga.authors.is_empty() {
-            "—".to_string()
-        } else {
-            manga.authors.join(", ")
+        missing += chapters.iter().filter(|c| !c.path().exists()).count();
+
+        let volumes = match store.volume_range(manga.id)? {
+            Some((first, last)) if first == last => format!("том {first}"),
+            Some((first, last)) => format!("тома {first}–{last}"),
+            None => format!("файлов {}", chapters.len()),
         };
-        println!(
-            "{:<4} {:<40} {}/{} глав  {}",
-            manga.id,
-            manga.title,
-            completed,
-            chapters.len(),
-            authors
-        );
+
+        let position = match store.resume_target(manga.id)? {
+            Some((chapter, Some(progress))) => {
+                format!(
+                    "остановились: {} стр. {}",
+                    chapter.label(),
+                    progress.page + 1
+                )
+            }
+            Some((chapter, None)) => format!("дальше: {}", chapter.label()),
+            None => "прочитано".to_string(),
+        };
+
+        println!("{:<34} {:<16} {}", manga.title, volumes, position);
     }
+
     println!("\nВсего тайтлов: {}", items.len());
+    println!("Подробности: yomi library НАЗВАНИЕ");
+
+    // Не чистим сами: пропавший файл может быть на отключённом диске,
+    // а удаление записи унесло бы прогресс. Просто предупреждаем.
+    if missing > 0 {
+        println!("\nФайлов не найдено на диске: {missing}. Проверить: yomi library clean");
+    }
     Ok(())
 }
 
-/// `yomi library resume` — показать, где остановились.
-///
-/// Команда намеренно не запускает читалку сама, а печатает готовую
-/// строку запуска: так видно, что именно откроется, и её можно
-/// поправить или подставить в скрипт.
-fn resume() -> Result<()> {
+/// `yomi library НАЗВАНИЕ` — тома тайтла, свежие сверху.
+fn show(title: &str) -> Result<()> {
     let store = open_store()?;
+    let found = store.list_manga(Some(title))?;
 
-    let Some((chapter, progress)) = store.last_unfinished()? else {
-        println!("Незавершённых глав нет. Начните читать: `yomi read ПУТЬ`");
-        return Ok(());
+    let manga = match found.len() {
+        0 => bail!("в библиотеке нет тайтла «{title}»"),
+        1 => &found[0],
+        _ => {
+            println!("Под «{title}» подходит несколько тайтлов:");
+            for m in &found {
+                println!("  {}", m.title);
+            }
+            bail!("уточните название");
+        }
     };
 
-    let manga = store.manga_by_id(chapter.manga_id)?;
-    let total = progress
-        .total_pages
-        .map(|t| t.to_string())
-        .unwrap_or_else(|| "?".to_string());
+    let mut chapters = store.chapters_of(manga.id)?;
+    // Свежее сверху: к последнему тому обращаются чаще, чем к первому.
+    chapters.reverse();
 
-    println!("{} — {}", manga.title, chapter.label());
-    println!(
-        "Остановились на странице {} из {}",
-        progress.page + 1,
-        total
-    );
-    println!();
-    println!("yomi read '{}'", chapter.external_id);
-    Ok(())
-}
+    let resume = store.resume_target(manga.id)?.map(|(c, _)| c.id);
 
-/// `yomi library chapters ID` — главы тайтла с отметками о прочтении.
-fn chapters(manga_id: i64) -> Result<()> {
-    let store = open_store()?;
-    let manga = store.manga_by_id(manga_id)?;
-    let chapters = store.chapters_of(manga_id)?;
-
-    if chapters.is_empty() {
-        println!("{}: глав нет", manga.title);
-        return Ok(());
+    println!("{}", manga.title);
+    if !manga.authors.is_empty() {
+        println!("{}", manga.authors.join(", "));
     }
+    println!();
 
-    println!("{}\n", manga.title);
+    let mut separator_drawn = false;
     for chapter in &chapters {
+        // Черта отделяет то, на чём остановились, от прочитанного ниже.
+        if !separator_drawn && Some(chapter.id) == resume {
+            println!("{}", "─".repeat(46));
+            separator_drawn = true;
+        }
+
         let mark = match store.progress_of(chapter.id)? {
             Some(p) if p.completed => "✓".to_string(),
             Some(p) => format!("{}", p.page + 1),
             None => "·".to_string(),
         };
-        let kind = match chapter.kind.as_str() {
-            "volume" => "том",
-            "chapter" => "глава",
-            "single" => "изобр.",
-            _ => "—",
+        let here = if Some(chapter.id) == resume {
+            " ←"
+        } else {
+            ""
         };
+
         println!(
-            "{mark:>4}  {:<24} {:<7} {:>4} стр.  {}",
+            "{mark:>5}  {:<26} {:>4} стр.{here}",
             chapter.label(),
-            kind,
-            chapter.page_count.unwrap_or(0),
-            chapter.external_id
+            chapter.page_count.unwrap_or(0)
         );
     }
-    println!("\nОткрыть: yomi read ПУТЬ");
+
+    println!("\nПродолжить: yomi read \"{}\"", manga.title);
     Ok(())
 }
 
 /// `yomi library clean` — убрать записи о пропавших файлах.
-///
-/// По умолчанию только показывает, что будет удалено. Причина серьёзная:
-/// если коллекция лежит на съёмном диске или сетевой шаре, а та не
-/// примонтирована, «пропавшими» окажутся все файлы разом — и молчаливая
-/// уборка унесла бы вместе с ними весь прогресс чтения.
 fn clean(confirmed: bool) -> Result<()> {
     let mut store = open_store()?;
 

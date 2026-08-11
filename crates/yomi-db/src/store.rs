@@ -376,6 +376,73 @@ impl Store {
         )?)
     }
 
+    /// На чём остановились в этом тайтле.
+    ///
+    /// Сначала ищется недочитанная глава с самой свежей отметкой
+    /// прогресса — это буквально «где я был». Если такой нет, берётся
+    /// первая непрочитанная по порядку: значит, тайтл либо не начат,
+    /// либо дочитан до конца очередного тома и пора браться за следующий.
+    pub fn resume_target(
+        &self,
+        manga_id: i64,
+    ) -> Result<Option<(LibraryChapter, Option<Progress>)>> {
+        let in_progress = self
+            .conn
+            .query_row(
+                "SELECT c.id, c.manga_id, c.external_id, c.number, c.volume, c.title,
+                        c.language, c.scanlator, c.page_count, c.kind,
+                        p.page, p.total_pages, p.completed
+                 FROM progress p
+                 JOIN chapters c ON c.id = p.chapter_id
+                 WHERE c.manga_id = ?1 AND p.completed = 0
+                 ORDER BY p.updated_at DESC
+                 LIMIT 1",
+                params![manga_id],
+                |r| {
+                    let chapter = row_to_chapter(r)?;
+                    let progress = Progress {
+                        chapter_id: chapter.id,
+                        page: r.get::<_, i64>(10)? as u32,
+                        total_pages: r.get::<_, Option<i64>>(11)?.map(|v| v as u32),
+                        completed: r.get::<_, i64>(12)? != 0,
+                    };
+                    Ok((chapter, Some(progress)))
+                },
+            )
+            .optional()?;
+
+        if in_progress.is_some() {
+            return Ok(in_progress);
+        }
+
+        // Ничего не начато или всё начатое дочитано: первая глава,
+        // которую ещё не закрыли.
+        for chapter in self.chapters_of(manga_id)? {
+            let done = self
+                .progress_of(chapter.id)?
+                .map(|p| p.completed)
+                .unwrap_or(false);
+            if !done {
+                return Ok(Some((chapter, None)));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Диапазон томов тайтла — для краткой строки в списке библиотеки.
+    pub fn volume_range(&self, manga_id: i64) -> Result<Option<(u16, u16)>> {
+        let mut volumes: Vec<u16> = self
+            .chapters_of(manga_id)?
+            .into_iter()
+            .filter_map(|c| c.volume)
+            .collect();
+        if volumes.is_empty() {
+            return Ok(None);
+        }
+        volumes.sort_unstable();
+        Ok(Some((volumes[0], *volumes.last().unwrap())))
+    }
+
     pub fn manga_count(&self) -> Result<i64> {
         Ok(self
             .conn
@@ -568,6 +635,65 @@ mod tests {
         let (chapter, progress) = s.last_unfinished().unwrap().expect("есть недочитанная");
         assert_eq!(chapter.id, chapters[1].id);
         assert_eq!(progress.page, 5);
+    }
+
+    #[test]
+    fn resume_target_prefers_the_chapter_in_progress() {
+        let mut s = Store::open_in_memory().unwrap();
+        let (manga_id, _) = s
+            .upsert_scanned(&scanned(vec![
+                chapter("/м/Т/1.cbz", 1.0),
+                chapter("/м/Т/2.cbz", 2.0),
+                chapter("/м/Т/3.cbz", 3.0),
+            ]))
+            .unwrap();
+        let chapters = s.chapters_of(manga_id).unwrap();
+
+        s.save_progress(chapters[0].id, 19, Some(20)).unwrap(); // дочитана
+        s.save_progress(chapters[1].id, 5, Some(20)).unwrap(); // брошена на середине
+
+        let (chapter, progress) = s.resume_target(manga_id).unwrap().unwrap();
+        assert_eq!(chapter.id, chapters[1].id);
+        assert_eq!(progress.unwrap().page, 5);
+    }
+
+    #[test]
+    fn resume_target_falls_back_to_the_first_unread() {
+        let mut s = Store::open_in_memory().unwrap();
+        let (manga_id, _) = s
+            .upsert_scanned(&scanned(vec![
+                chapter("/м/Т/1.cbz", 1.0),
+                chapter("/м/Т/2.cbz", 2.0),
+            ]))
+            .unwrap();
+        let chapters = s.chapters_of(manga_id).unwrap();
+        s.save_progress(chapters[0].id, 19, Some(20)).unwrap();
+
+        let (chapter, progress) = s.resume_target(manga_id).unwrap().unwrap();
+        assert_eq!(chapter.id, chapters[1].id, "пора браться за следующий том");
+        assert!(progress.is_none());
+    }
+
+    #[test]
+    fn resume_target_is_none_when_everything_is_read() {
+        let mut s = Store::open_in_memory().unwrap();
+        let (manga_id, _) = s
+            .upsert_scanned(&scanned(vec![chapter("/м/Т/1.cbz", 1.0)]))
+            .unwrap();
+        let id = s.chapters_of(manga_id).unwrap()[0].id;
+        s.save_progress(id, 19, Some(20)).unwrap();
+        assert!(s.resume_target(manga_id).unwrap().is_none());
+    }
+
+    #[test]
+    fn volume_range_covers_all_chapters() {
+        let mut s = Store::open_in_memory().unwrap();
+        let mut a = chapter("/м/Т/33.cbz", 1.0);
+        a.volume = Some(33);
+        let mut b = chapter("/м/Т/35.cbz", 2.0);
+        b.volume = Some(35);
+        let (manga_id, _) = s.upsert_scanned(&scanned(vec![a, b])).unwrap();
+        assert_eq!(s.volume_range(manga_id).unwrap(), Some((33, 35)));
     }
 
     #[test]

@@ -50,14 +50,21 @@ fn resolve_direction(d: ReadingDirection) -> Direction {
 }
 
 pub async fn run(ctx: &Ctx, args: &ReadArgs) -> Result<()> {
-    if !args.path.exists() {
-        bail!("путь не существует: {}", args.path.display());
-    }
+    // Аргумент — либо путь, либо название тайтла. Разбираем именно в
+    // таком порядке: существующий файл всегда важнее совпадения имён,
+    // иначе тайтл с названием вроде «том.cbz» перехватил бы открытие
+    // настоящего файла.
+    let candidate = std::path::PathBuf::from(&args.target);
+    let path = if candidate.exists() {
+        candidate
+    } else {
+        resolve_by_title(&args.target)?
+    };
 
     // CBR/RAR узнаём раньше PageSource::open: у отказа есть конкретная
     // причина (несвободная лицензия unrar, см. ADR-0006), и пользователь
     // должен увидеть её, а не обезличенное «формат не поддерживается».
-    if let Some(ext) = args.path.extension().and_then(|e| e.to_str()) {
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
         if matches!(ext.to_lowercase().as_str(), "cbr" | "rar") {
             bail!("CBR/RAR пока не поддерживается, см. docs/adr/0006-formats.md");
         }
@@ -76,8 +83,8 @@ pub async fn run(ctx: &Ctx, args: &ReadArgs) -> Result<()> {
         .unwrap_or(ctx.config.reader.renderer);
     let protocol = resolve_protocol(renderer);
 
-    let source = PageSource::open(&args.path)
-        .map_err(|e| anyhow::anyhow!(e).context(format!("открытие {}", args.path.display())))?;
+    let source = PageSource::open(&path)
+        .map_err(|e| anyhow::anyhow!(e).context(format!("открытие {}", path.display())))?;
 
     let fit = resolve_fit(args.fit.map(Into::into).unwrap_or(ctx.config.reader.fit));
     // Флаг командной строки только включает увеличение, но не выключает
@@ -91,7 +98,7 @@ pub async fn run(ctx: &Ctx, args: &ReadArgs) -> Result<()> {
     );
 
     tracing::info!(
-        path = %args.path.display(),
+        path = %path.display(),
         pages = source.page_count(),
         protocol = protocol.label_ru(),
         ?fit,
@@ -119,11 +126,9 @@ pub async fn run(ctx: &Ctx, args: &ReadArgs) -> Result<()> {
     // записываем прогресс на выходе. Отсутствие базы или записи — не
     // ошибка: читать файл, которого нет в библиотеке, тоже нужно.
     let store = open_store_quietly();
-    let known_chapter = store.as_ref().and_then(|s| {
-        s.chapter_by_path(&args.path.to_string_lossy())
-            .ok()
-            .flatten()
-    });
+    let known_chapter = store
+        .as_ref()
+        .and_then(|s| s.chapter_by_path(&path.to_string_lossy()).ok().flatten());
 
     // Явно указанная страница всегда важнее сохранённого прогресса.
     let start = match (&store, &known_chapter) {
@@ -143,7 +148,7 @@ pub async fn run(ctx: &Ctx, args: &ReadArgs) -> Result<()> {
 
     // Закладки внутри файла читаем всегда: их кладёт `yomi build`,
     // и навигация по главам должна работать сразу после сборки.
-    let from_file: Vec<u32> = yomi_viewer::scan::read_comicinfo(&args.path)
+    let from_file: Vec<u32> = yomi_viewer::scan::read_comicinfo(&path)
         .map(|info| info.bookmarks.iter().map(|b| b.page).collect())
         .unwrap_or_default();
 
@@ -165,8 +170,7 @@ pub async fn run(ctx: &Ctx, args: &ReadArgs) -> Result<()> {
             println!(
                 "Файла нет в библиотеке — прогресс чтения сохранён не будет.\n\
                  Добавить: yomi library scan {}",
-                args.path
-                    .parent()
+                path.parent()
                     .map(|p| p.display().to_string())
                     .unwrap_or_else(|| ".".to_string())
             );
@@ -205,6 +209,51 @@ pub async fn run(ctx: &Ctx, args: &ReadArgs) -> Result<()> {
     outcome
         .map(|_| ())
         .map_err(|e| anyhow::anyhow!(e).context("отображение страниц"))
+}
+
+/// Ищет файл по названию тайтла и возвращает то, на чём остановились.
+///
+/// Нужен, чтобы `yomi read Usogui` открывал нужный том сам. Название
+/// разбирается только когда пути с таким именем не существует, поэтому
+/// перехватить открытие настоящего файла оно не может.
+fn resolve_by_title(title: &str) -> Result<std::path::PathBuf> {
+    let Some(store) = open_store_quietly() else {
+        bail!(
+            "«{title}» — не файл и не тайтл: библиотека пуста.\n\
+             Создать: yomi library scan КАТАЛОГ"
+        );
+    };
+
+    let found = store.list_manga(Some(title))?;
+    let manga = match found.len() {
+        0 => bail!(
+            "«{title}» — не файл и не название тайтла из библиотеки.\n\
+             Что есть: yomi library"
+        ),
+        1 => &found[0],
+        _ => {
+            println!("Под «{title}» подходит несколько тайтлов:");
+            for m in &found {
+                println!("  {}", m.title);
+            }
+            bail!("уточните название");
+        }
+    };
+
+    match store.resume_target(manga.id)? {
+        Some((chapter, progress)) => {
+            let position = progress
+                .map(|p| format!(", страница {}", p.page + 1))
+                .unwrap_or_default();
+            println!("{} — {}{}", manga.title, chapter.label(), position);
+            Ok(chapter.path())
+        }
+        None => bail!(
+            "«{}» прочитан целиком. Открыть том явно: yomi library \"{}\"",
+            manga.title,
+            manga.title
+        ),
+    }
 }
 
 /// Отметки глав: из библиотеки, а при их отсутствии — из самого файла.

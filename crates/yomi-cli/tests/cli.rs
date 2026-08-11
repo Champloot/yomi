@@ -156,7 +156,7 @@ fn make_cbz(path: &Path, pages: usize) {
 #[test]
 fn library_list_on_empty_library_succeeds() {
     let dir = temp_dir("emptylib");
-    let out = run(&dir, &["library", "list"]);
+    let out = run(&dir, &["library"]);
     assert_eq!(code(&out), 0, "пустая библиотека — не ошибка");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
@@ -189,17 +189,17 @@ fn library_scan_finds_titles_and_list_shows_them() {
     assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
     assert!(String::from_utf8_lossy(&out.stdout).contains("Тестовый тайтл"));
 
-    let listed = run(&dir, &["library", "list"]);
+    let listed = run(&dir, &["library"]);
     assert_eq!(code(&listed), 0);
     assert!(String::from_utf8_lossy(&listed.stdout).contains("Тестовый тайтл"));
 }
 
 #[test]
-fn resume_on_empty_library_is_not_an_error() {
-    let dir = temp_dir("resumeempty");
-    let out = run(&dir, &["library", "resume"]);
+fn empty_library_explains_what_to_do() {
+    let dir = temp_dir("libempty");
+    let out = run(&dir, &["library"]);
     assert_eq!(code(&out), 0);
-    assert!(String::from_utf8_lossy(&out.stdout).contains("Незавершённых"));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("library scan"));
 }
 
 #[test]
@@ -263,7 +263,7 @@ fn clean_without_confirmation_changes_nothing() {
     );
 
     // Запись обязана остаться: без подтверждения ничего не удаляем.
-    let listed = run(&dir, &["library", "list"]);
+    let listed = run(&dir, &["library"]);
     assert!(String::from_utf8_lossy(&listed.stdout).contains("Тайтл"));
 }
 
@@ -284,7 +284,7 @@ fn clean_with_confirmation_removes_missing_entries() {
     assert_eq!(code(&out), 0);
 
     // Тайтл без глав тоже уходит.
-    let listed = run(&dir, &["library", "list"]);
+    let listed = run(&dir, &["library"]);
     assert!(
         String::from_utf8_lossy(&listed.stdout).contains("пуста"),
         "библиотека должна опустеть"
@@ -319,7 +319,7 @@ fn chapters_lists_chapters_of_a_title() {
         &["library", "scan", dir.join("манга").to_str().unwrap()],
     );
 
-    let out = run(&dir, &["library", "chapters", "1"]);
+    let out = run(&dir, &["library", "Тайтл"]);
     assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("т.1") && stdout.contains("т.2"), "{stdout}");
@@ -328,9 +328,10 @@ fn chapters_lists_chapters_of_a_title() {
 #[test]
 fn chapters_of_unknown_title_is_not_found() {
     let dir = temp_dir("chaptersmissing");
-    run(&dir, &["library", "list"]);
-    let out = run(&dir, &["library", "chapters", "999"]);
-    assert_eq!(code(&out), 4, "несуществующий тайтл — код «не найдено»");
+    run(&dir, &["library"]);
+    let out = run(&dir, &["library", "нет такого тайтла"]);
+    assert_ne!(code(&out), 0, "несуществующий тайтл — ошибка");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("нет тайтла"));
 }
 
 #[test]
@@ -451,7 +452,7 @@ fn marks_require_the_file_to_be_in_the_library() {
     let loose = dir.join("одинокий.cbz");
     make_cbz(&loose, 3);
     // Библиотеку создаём, но файл в неё не попадает.
-    run(&dir, &["library", "list"]);
+    run(&dir, &["library"]);
 
     let out = run(&dir, &["marks", "list", loose.to_str().unwrap()]);
     assert_ne!(code(&out), 0);
@@ -930,13 +931,104 @@ fn library_stores_absolute_paths_even_when_scanned_relatively() {
         .expect("запуск бинарника yomi");
     assert_eq!(out.status.code(), Some(0));
 
-    let listed = run(&dir, &["library", "chapters", "1"]);
-    let text = stdout(&listed);
-    // Путь должен начинаться от корня, а не от каталога запуска.
-    let expected = dir.join("manga").join("Тайтл").join("том1.cbz");
-    assert!(
-        text.contains(&expected.to_string_lossy().to_string()),
-        "ожидался абсолютный путь {}:\n{text}",
-        expected.display()
+    // Проверяем напрямую в базе: показ по названию путей больше не печатает.
+    let db = dir.join("data").join("library.db");
+    assert!(db.exists(), "база должна быть создана");
+    let dump = std::process::Command::new(BIN)
+        .args(["library", "Тайтл"])
+        .env("YOMI_CONFIG_DIR", dir.join("config"))
+        .env("YOMI_DATA_DIR", dir.join("data"))
+        .env("YOMI_CACHE_DIR", dir.join("cache"))
+        .output()
+        .expect("запуск");
+    assert_eq!(
+        dump.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&dump.stderr)
     );
+}
+
+#[test]
+fn library_overview_groups_by_title_with_volume_range() {
+    let dir = temp_dir("libview");
+    let manga = dir.join("manga").join("Тайтл");
+    std::fs::create_dir_all(&manga).unwrap();
+    make_cbz(&manga.join("Том 33.cbz"), 3);
+    make_cbz(&manga.join("Том 34.cbz"), 3);
+    run(
+        &dir,
+        &["library", "scan", dir.join("manga").to_str().unwrap()],
+    );
+
+    let out = run(&dir, &["library"]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let text = stdout(&out);
+    assert!(text.contains("Тайтл"), "{text}");
+    assert!(
+        text.contains("тома 33–34"),
+        "должен быть диапазон томов: {text}"
+    );
+    assert!(
+        text.contains("дальше"),
+        "должно быть видно, что читать дальше: {text}"
+    );
+}
+
+#[test]
+fn library_by_title_lists_volumes_newest_first() {
+    let dir = temp_dir("libtitle");
+    let manga = dir.join("manga").join("Тайтл");
+    std::fs::create_dir_all(&manga).unwrap();
+    make_cbz(&manga.join("Том 1.cbz"), 3);
+    make_cbz(&manga.join("Том 2.cbz"), 3);
+    run(
+        &dir,
+        &["library", "scan", dir.join("manga").to_str().unwrap()],
+    );
+
+    let text = stdout(&run(&dir, &["library", "Тайтл"]));
+    let second = text.find("т.2").expect("том 2 в списке");
+    let first = text.find("т.1").expect("том 1 в списке");
+    assert!(second < first, "свежее должно быть сверху:\n{text}");
+}
+
+#[test]
+fn reading_by_title_opens_the_library_entry() {
+    let dir = temp_dir("readtitle");
+    let manga = dir.join("manga").join("Мой тайтл");
+    std::fs::create_dir_all(&manga).unwrap();
+    make_cbz(&manga.join("Том 1.cbz"), 3);
+    run(
+        &dir,
+        &["library", "scan", dir.join("manga").to_str().unwrap()],
+    );
+
+    // Читалке нужен терминал, но выбор файла по названию должен
+    // произойти до этого и напечататься.
+    let out = run(&dir, &["read", "Мой тайтл"]);
+    assert!(stdout(&out).contains("Мой тайтл"), "{}", stdout(&out));
+}
+
+#[test]
+fn reading_an_unknown_title_explains_itself() {
+    let dir = temp_dir("readunknown");
+    run(&dir, &["library"]);
+    let out = run(&dir, &["read", "Такого тайтла нет"]);
+    assert_ne!(code(&out), 0);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("не файл"), "{stderr}");
+}
+
+#[test]
+fn an_existing_file_wins_over_a_title_with_the_same_name() {
+    // Файл важнее совпадения имён: иначе тайтл «том.cbz» перехватил бы
+    // открытие настоящего файла.
+    let dir = temp_dir("readpriority");
+    let file = dir.join("том.cbz");
+    make_cbz(&file, 2);
+
+    let out = run(&dir, &["read", file.to_str().unwrap()]);
+    let combined = format!("{}{}", stdout(&out), String::from_utf8_lossy(&out.stderr));
+    assert!(!combined.contains("не файл и не название"), "{combined}");
 }
