@@ -678,3 +678,251 @@ mod tests {
         assert!(!result.fields.is_empty());
     }
 }
+
+/// «Отпечаток» имени: текст **до первого числа**.
+///
+/// У файлов одного тайтла эта часть совпадает, у разных различается —
+/// признак деления надёжнее любых чисел. Важно брать именно начало:
+/// хвост после номеров — это название главы, и оно у файлов одного тома
+/// разное. Учитывая его, том разваливался бы на группы по одному файлу.
+pub fn signature(stem: &str) -> String {
+    stem.chars()
+        .take_while(|c| !c.is_ascii_digit())
+        .filter(|c| !SEPARATORS.contains(c))
+        .collect::<String>()
+        .to_lowercase()
+}
+
+/// Найденная группа файлов — предположительно один том.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Group {
+    /// Номера файлов в исходном списке.
+    pub files: Vec<usize>,
+    pub volume: Option<u16>,
+    pub series: Option<String>,
+}
+
+/// Результат разбиения набора на тома.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Grouping {
+    pub groups: Vec<Group>,
+    /// Уверенность в том, какая позиция чисел означает том.
+    pub confident: bool,
+}
+
+/// Насколько связной выглядит группа: сумма «плотности» и размера.
+///
+/// Идея из наблюдения пользователя: набор 21-12, 21-13, 21-14, 22-12
+/// делится по первому числу, потому что три файла с 21 — это связная
+/// последовательность глав, а не совпадение. Оценка вознаграждает и
+/// крупные группы, и идущие подряд номера глав внутри них.
+fn score_split(values: &[(f32, f32)]) -> f32 {
+    use std::collections::BTreeMap;
+
+    let mut groups: BTreeMap<i64, Vec<f32>> = BTreeMap::new();
+    for (volume, chapter) in values {
+        groups.entry(*volume as i64).or_default().push(*chapter);
+    }
+
+    let mut score = 0.0;
+    for chapters in groups.values_mut() {
+        chapters.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        // Крупная группа лучше россыпи одиночек.
+        score += (chapters.len() as f32 - 1.0).max(0.0);
+        // Идущие подряд главы — сильный признак, что это один том.
+        for pair in chapters.windows(2) {
+            if (pair[1] - pair[0] - 1.0).abs() < 0.01 {
+                score += 1.0;
+            }
+        }
+    }
+    score
+}
+
+/// Делит набор файлов на тома.
+///
+/// Сначала по названию — файлы разных произведений в один том не
+/// попадут. Затем внутри каждого названия выбирается, какая позиция
+/// чисел означает том: та, что даёт более связное разбиение.
+pub fn group_files(stems: &[String]) -> Grouping {
+    use std::collections::BTreeMap;
+
+    if stems.is_empty() {
+        return Grouping {
+            groups: Vec::new(),
+            confident: true,
+        };
+    }
+
+    // Шаг первый: по названию.
+    let mut by_series: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (index, stem) in stems.iter().enumerate() {
+        by_series.entry(signature(stem)).or_default().push(index);
+    }
+
+    let mut groups = Vec::new();
+    let mut confident = true;
+
+    for (_, indices) in by_series {
+        let names: Vec<String> = indices.iter().map(|i| stems[*i].clone()).collect();
+        let parsed: Vec<ParsedName> = names.iter().map(|s| parse_name(s)).collect();
+        let series = common_title(&names);
+
+        let count = parsed.first().map(|p| p.numbers.len()).unwrap_or(0);
+        let uniform = parsed.iter().all(|p| p.numbers.len() == count);
+
+        // Меньше двух чисел — делить не по чему: это один том.
+        if count < 2 || !uniform {
+            let analysis = analyze(&names);
+            groups.push(Group {
+                files: indices,
+                volume: analysis.fields.first().and_then(|f| f.volume),
+                series,
+            });
+            continue;
+        }
+
+        // Пробуем каждую позицию в роли тома и сравниваем связность.
+        let mut scored: Vec<(f32, usize, usize)> = Vec::new();
+        for volume_pos in 0..count {
+            for chapter_pos in 0..count {
+                if volume_pos == chapter_pos {
+                    continue;
+                }
+                let values: Vec<(f32, f32)> = parsed
+                    .iter()
+                    .map(|p| (p.numbers[volume_pos], p.numbers[chapter_pos]))
+                    .collect();
+                scored.push((score_split(&values), volume_pos, chapter_pos));
+            }
+        }
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        let Some(&(best_score, volume_pos, _)) = scored.first() else {
+            continue;
+        };
+        // Близкие оценки означают, что разбиение неоднозначно и
+        // спросить пользователя честнее, чем угадать.
+        if let Some(&(second, _, _)) = scored.get(1) {
+            if (best_score - second).abs() < 0.5 {
+                confident = false;
+            }
+        }
+
+        let mut by_volume: BTreeMap<i64, Vec<usize>> = BTreeMap::new();
+        for (position, index) in indices.iter().enumerate() {
+            by_volume
+                .entry(parsed[position].numbers[volume_pos] as i64)
+                .or_default()
+                .push(*index);
+        }
+
+        for (volume, files) in by_volume {
+            groups.push(Group {
+                files,
+                volume: Some(volume as u16),
+                series: series.clone(),
+            });
+        }
+    }
+
+    Grouping { groups, confident }
+}
+
+#[cfg(test)]
+mod grouping_tests {
+    use super::*;
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn three_matches_beat_one_as_the_user_reasoned() {
+        // 21-12, 21-13, 21-14, 22-12: три файла с 21 подряд — это том 21,
+        // а не совпадение номеров глав.
+        let result = group_files(&names(&[
+            "_21_12_Название",
+            "_21_13_Название",
+            "_21_14_Название",
+            "_22_12_Название",
+        ]));
+        let volumes: Vec<Option<u16>> = result.groups.iter().map(|g| g.volume).collect();
+        assert!(volumes.contains(&Some(21)), "{volumes:?}");
+        assert!(volumes.contains(&Some(22)), "{volumes:?}");
+        assert_eq!(result.groups.len(), 2);
+
+        let big = result.groups.iter().find(|g| g.volume == Some(21)).unwrap();
+        assert_eq!(big.files.len(), 3);
+    }
+
+    #[test]
+    fn different_series_never_share_a_volume() {
+        let result = group_files(&names(&[
+            "Первый тайтл - 1 - 1",
+            "Первый тайтл - 1 - 2",
+            "Второй тайтл - 1 - 1",
+        ]));
+        assert_eq!(
+            result.groups.len(),
+            2,
+            "разные произведения — разные группы"
+        );
+        assert!(result.groups.iter().any(|g| g.files.len() == 2));
+    }
+
+    #[test]
+    fn real_world_two_volumes_are_separated() {
+        let result = group_files(&names(&[
+            "33_-_359_Первая",
+            "33_-_360_Вторая",
+            "34_-_362_Третья",
+            "34_-_363_Четвёртая",
+        ]));
+        // Названия у файлов разные, но текстовая часть у всех своя —
+        // делить должно по номеру тома, а не по названию главы.
+        let volumes: Vec<Option<u16>> = result.groups.iter().map(|g| g.volume).collect();
+        assert!(
+            volumes.contains(&Some(33)) && volumes.contains(&Some(34)),
+            "{volumes:?}"
+        );
+    }
+
+    #[test]
+    fn a_single_volume_stays_whole() {
+        let result = group_files(&names(&["v01 c01", "v01 c02", "v01 c03"]));
+        assert_eq!(result.groups.len(), 1);
+        assert_eq!(result.groups[0].files.len(), 3);
+    }
+
+    #[test]
+    fn empty_input_yields_no_groups() {
+        assert!(group_files(&[]).groups.is_empty());
+    }
+
+    #[test]
+    fn signature_ignores_numbers_and_separators() {
+        assert_eq!(signature("_21_12_Название"), signature("_22_13_Название"));
+        assert_ne!(signature("Первый 1"), signature("Второй 1"));
+    }
+
+    #[test]
+    fn signature_ignores_chapter_titles_after_the_numbers() {
+        // Иначе том разваливается: у каждой главы своё название.
+        assert_eq!(
+            signature("33_-_359_Долгое послевкусие"),
+            signature("33_-_360_Прокачка любви")
+        );
+    }
+
+    #[test]
+    fn chapters_of_one_volume_with_different_titles_stay_together() {
+        let result = group_files(&names(&[
+            "33_-_359_Первая",
+            "33_-_360_Вторая",
+            "33_-_361_Третья",
+        ]));
+        assert_eq!(result.groups.len(), 1, "это один том: {:?}", result.groups);
+        assert_eq!(result.groups[0].files.len(), 3);
+    }
+}

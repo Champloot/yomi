@@ -735,3 +735,85 @@ fn output_does_not_panic_when_the_pipe_closes() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!stderr.contains("panicked"), "{stderr}");
 }
+
+#[test]
+fn build_splits_a_mixed_directory_into_volumes() {
+    let dir = temp_dir("buildgroups");
+    let mixed = dir.join("вперемешку");
+    std::fs::create_dir_all(&mixed).unwrap();
+    // Три файла тома 21 и один тома 22: связная последовательность
+    // важнее одиночного совпадения номеров.
+    for name in [
+        "_21_12_Наз.cbz",
+        "_21_13_Наз.cbz",
+        "_21_14_Наз.cbz",
+        "_22_12_Наз.cbz",
+    ] {
+        make_cbz(&mixed.join(name), 3);
+    }
+
+    let out = run(
+        &dir,
+        &["build", mixed.to_str().unwrap(), "--series", "Т", "--yes"],
+    );
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+
+    let text = stdout(&out);
+    assert!(text.contains("найдено групп: 2"), "{text}");
+    assert!(
+        dir.join("Т_Vol_21.cbz").exists(),
+        "том 21 должен собраться отдельно"
+    );
+    assert!(dir.join("Т_Vol_22.cbz").exists(), "том 22 тоже");
+
+    // В томе 21 должно быть три главы, а не все четыре файла.
+    let info = stdout(&run(
+        &dir,
+        &["info", dir.join("Т_Vol_21.cbz").to_str().unwrap()],
+    ));
+    assert!(
+        info.contains("Глава 12") && info.contains("Глава 14"),
+        "{info}"
+    );
+    assert!(
+        !info.contains("Страниц: 12"),
+        "лишний файл попал в том: {info}"
+    );
+}
+
+#[test]
+fn build_keeps_different_series_apart() {
+    let dir = temp_dir("buildseries");
+    let mixed = dir.join("вперемешку");
+    std::fs::create_dir_all(&mixed).unwrap();
+    make_cbz(&mixed.join("Первый_1_1_Имя.cbz"), 2);
+    make_cbz(&mixed.join("Первый_1_2_Имя.cbz"), 2);
+    make_cbz(&mixed.join("Второй_1_1_Имя.cbz"), 2);
+
+    let out = run(&dir, &["build", mixed.to_str().unwrap(), "--yes"]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let text = stdout(&out);
+    assert!(
+        text.contains("найдено групп: 2"),
+        "разные тайтлы не должны сливаться: {text}"
+    );
+}
+
+#[test]
+fn single_volume_directory_is_not_treated_as_groups() {
+    let dir = temp_dir("buildone");
+    let one = dir.join("том");
+    std::fs::create_dir_all(&one).unwrap();
+    make_cbz(&one.join("v01 c01.cbz"), 2);
+    make_cbz(&one.join("v01 c02.cbz"), 2);
+
+    let out = run(
+        &dir,
+        &["build", one.to_str().unwrap(), "--series", "Т", "--yes"],
+    );
+    assert_eq!(code(&out), 0);
+    assert!(
+        !stdout(&out).contains("найдено групп"),
+        "один том — без разговоров о группах"
+    );
+}

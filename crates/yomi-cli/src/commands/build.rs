@@ -124,6 +124,108 @@ fn build_volume(dir: &Path, args: &BuildArgs) -> Result<()> {
     }
 
     let files = collect_chapters(dir)?;
+    let all_stems: Vec<String> = files
+        .iter()
+        .map(|p| {
+            p.file_stem()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default()
+        })
+        .collect();
+
+    // В каталоге может лежать несколько томов, а то и разные тайтлы.
+    // Сливать их в один файл нельзя, поэтому сначала делим.
+    let grouping = parse::group_files(&all_stems);
+    if grouping.groups.len() > 1 {
+        return build_many(dir, &files, &all_stems, &grouping, args);
+    }
+
+    build_single(dir, files, args)
+}
+
+/// Собирает несколько томов из одного каталога.
+fn build_many(
+    dir: &Path,
+    files: &[PathBuf],
+    stems: &[String],
+    grouping: &parse::Grouping,
+    args: &BuildArgs,
+) -> Result<()> {
+    println!(
+        "В каталоге несколько томов — найдено групп: {}\n",
+        grouping.groups.len()
+    );
+
+    for group in &grouping.groups {
+        let title = group.series.as_deref().unwrap_or("без названия");
+        let volume = group
+            .volume
+            .map(|v| format!("том {v}"))
+            .unwrap_or_else(|| "том не определён".to_string());
+        println!("  {title} — {volume}, файлов {}", group.files.len());
+        for index in &group.files {
+            println!("      {}", stems[*index]);
+        }
+    }
+
+    if !grouping.confident {
+        // Оценки разбиений оказались близки: угадывать молча нечестно.
+        println!(
+            "\nРазбиение неоднозначно: числа в именах можно прочесть\n\
+             и как «том — глава», и наоборот. Проверьте группы выше."
+        );
+    }
+
+    // Название спрашиваем один раз на весь каталог, а не по тому:
+    // внутри пакетной сборки вопросы отключены, и без этого файлы
+    // вышли бы с именем «Без названия_Vol_21.cbz».
+    let mut fallback_series = args.series.clone();
+    if fallback_series.is_none() && !args.yes && grouping.groups.iter().any(|g| g.series.is_none())
+    {
+        let answer = ask("\nНазвание тайтла для групп без названия [Enter — пропустить]: ")?;
+        if !answer.is_empty() {
+            fallback_series = Some(answer);
+        }
+    }
+
+    if !args.yes {
+        let answer = ask("\nСобрать все тома? [Y/n]: ")?;
+        if matches!(answer.to_lowercase().as_str(), "n" | "н" | "no" | "нет") {
+            bail!("отменено");
+        }
+    }
+
+    for group in &grouping.groups {
+        let group_files: Vec<PathBuf> = group.files.iter().map(|i| files[*i].clone()).collect();
+        let mut group_args = clone_args(args);
+        group_args.volume = args.volume.or(group.volume);
+        group_args.series = group.series.clone().or_else(|| fallback_series.clone());
+        // Внутри пакетной сборки вопросов уже не задаём: состав
+        // подтверждён целиком, переспрашивать по каждому тому назойливо.
+        group_args.yes = true;
+
+        println!();
+        build_single(dir, group_files, &group_args)?;
+    }
+
+    Ok(())
+}
+
+/// Копия аргументов: `BuildArgs` не `Clone`, а менять исходные нельзя.
+fn clone_args(args: &BuildArgs) -> BuildArgs {
+    BuildArgs {
+        path: args.path.clone(),
+        add: args.add.clone(),
+        output: args.output.clone(),
+        series: args.series.clone(),
+        volume: args.volume,
+        start_chapter: args.start_chapter,
+        yes: args.yes,
+        force: args.force,
+    }
+}
+
+fn build_single(dir: &Path, files: Vec<PathBuf>, args: &BuildArgs) -> Result<()> {
     let stems: Vec<String> = files
         .iter()
         .map(|p| {
