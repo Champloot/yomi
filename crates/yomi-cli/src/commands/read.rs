@@ -55,10 +55,10 @@ pub async fn run(ctx: &Ctx, args: &ReadArgs) -> Result<()> {
     // иначе тайтл с названием вроде «том.cbz» перехватил бы открытие
     // настоящего файла.
     let candidate = std::path::PathBuf::from(&args.target);
-    let path = if candidate.exists() {
-        candidate
+    let (path, jump_to_page) = if candidate.exists() {
+        (candidate, None)
     } else {
-        resolve_by_title(&args.target)?
+        resolve_by_title(&args.target, args.volume, args.chapter)?
     };
 
     // CBR/RAR узнаём раньше PageSource::open: у отказа есть конкретная
@@ -131,6 +131,14 @@ pub async fn run(ctx: &Ctx, args: &ReadArgs) -> Result<()> {
         .and_then(|s| s.chapter_by_path(&path.to_string_lossy()).ok().flatten());
 
     // Явно указанная страница всегда важнее сохранённого прогресса.
+    // Переход к указанной главе важнее сохранённого прогресса: человек
+    // попросил конкретное место, а не «продолжить».
+    let start = if let Some(page) = jump_to_page {
+        (page as usize).min(source.page_count().saturating_sub(1))
+    } else {
+        start
+    };
+
     let start = match (&store, &known_chapter) {
         (Some(store), Some(chapter)) if args.page == 1 => match store.progress_of(chapter.id) {
             Ok(Some(p)) if !p.completed && (p.page as usize) < source.page_count() => {
@@ -216,7 +224,11 @@ pub async fn run(ctx: &Ctx, args: &ReadArgs) -> Result<()> {
 /// Нужен, чтобы `yomi read Usogui` открывал нужный том сам. Название
 /// разбирается только когда пути с таким именем не существует, поэтому
 /// перехватить открытие настоящего файла оно не может.
-fn resolve_by_title(title: &str) -> Result<std::path::PathBuf> {
+fn resolve_by_title(
+    title: &str,
+    volume: Option<u16>,
+    chapter: Option<f32>,
+) -> Result<(std::path::PathBuf, Option<u32>)> {
     let Some(store) = open_store_quietly() else {
         bail!(
             "«{title}» — не файл и не тайтл: библиотека пуста.\n\
@@ -240,16 +252,55 @@ fn resolve_by_title(title: &str) -> Result<std::path::PathBuf> {
         }
     };
 
+    // Явно указанная глава важнее всего: человек знает, что ищет.
+    if let Some(number) = chapter {
+        return match store.locate_chapter(manga.id, number)? {
+            Some((found, page)) => {
+                let position = page
+                    .map(|p| format!(", страница {}", p + 1))
+                    .unwrap_or_default();
+                println!(
+                    "{} — глава {number} в {}{}",
+                    manga.title,
+                    found.label(),
+                    position
+                );
+                Ok((found.path(), page))
+            }
+            None => bail!(
+                "главы {number} нет в библиотеке «{}».\n\
+                 Что есть: yomi library \"{}\"",
+                manga.title,
+                manga.title
+            ),
+        };
+    }
+
+    if let Some(number) = volume {
+        return match store.chapter_by_volume(manga.id, number)? {
+            Some(found) => {
+                println!("{} — {}", manga.title, found.label());
+                Ok((found.path(), None))
+            }
+            None => bail!(
+                "тома {number} нет в библиотеке «{}».\n\
+                 Что есть: yomi library \"{}\"",
+                manga.title,
+                manga.title
+            ),
+        };
+    }
+
     match store.resume_target(manga.id)? {
-        Some((chapter, progress)) => {
+        Some((found, progress)) => {
             let position = progress
                 .map(|p| format!(", страница {}", p.page + 1))
                 .unwrap_or_default();
-            println!("{} — {}{}", manga.title, chapter.label(), position);
-            Ok(chapter.path())
+            println!("{} — {}{}", manga.title, found.label(), position);
+            Ok((found.path(), None))
         }
         None => bail!(
-            "«{}» прочитан целиком. Открыть том явно: yomi library \"{}\"",
+            "«{}» прочитан целиком. Открыть том явно: yomi read \"{}\" --volume НОМЕР",
             manga.title,
             manga.title
         ),

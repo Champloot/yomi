@@ -27,6 +27,8 @@ pub struct ComicInfo {
     /// Команда перевода (тег `Translator` или `Publisher`).
     pub scanlator: Option<String>,
     pub page_count: Option<u32>,
+    /// Тег `Notes` — туда `yomi build` пишет, что файл собран им.
+    pub notes: Option<String>,
     /// Закладки из блока `<Pages>`: штатный способ отметить, с какой
     /// страницы начинается глава внутри тома. Их проставляют Komga,
     /// Kavita и ComicRack, и это единственный достоверный источник
@@ -85,6 +87,7 @@ pub fn parse(xml: &str) -> ComicInfo {
             .or_else(|| tag(xml, "Publisher"))
             .map(unescape),
         page_count: tag(xml, "PageCount").and_then(|v| v.parse().ok()),
+        notes: tag(xml, "Notes").map(unescape),
         bookmarks: parse_bookmarks(xml),
     }
 }
@@ -212,6 +215,13 @@ mod tests {
     fn entities_are_unescaped() {
         let info = parse("<ComicInfo><Series>Кровь &amp; сталь</Series></ComicInfo>");
         assert_eq!(info.series.as_deref(), Some("Кровь & сталь"));
+    }
+
+    #[test]
+    fn notes_are_read() {
+        // По этой пометке сканирование узнаёт свои же собранные тома.
+        let info = parse("<ComicInfo><Notes>собрано yomi из 3 глав</Notes></ComicInfo>");
+        assert_eq!(info.notes.as_deref(), Some("собрано yomi из 3 глав"));
     }
 
     #[test]

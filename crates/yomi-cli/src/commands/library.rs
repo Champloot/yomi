@@ -10,6 +10,8 @@ pub async fn run(ctx: &Ctx, args: &LibraryArgs) -> Result<()> {
     match (&args.command, &args.title) {
         (Some(LibraryCommand::Scan { paths }), _) => scan(ctx, paths),
         (Some(LibraryCommand::Clean { yes }), _) => clean(*yes),
+        (Some(LibraryCommand::Forget { target }), _) => forget(target),
+        (Some(LibraryCommand::Reset { yes }), _) => reset(*yes),
         (None, Some(title)) => show(title),
         (None, None) => overview(),
     }
@@ -94,9 +96,24 @@ fn scan(ctx: &Ctx, paths: &[std::path::PathBuf]) -> Result<()> {
             let chapters = found.chapters.len();
             let record = to_db(found);
             let title = record.title.clone();
-            store
+            let (manga_id, _) = store
                 .upsert_scanned(&record)
                 .with_context(|| format!("запись тайтла «{title}»"))?;
+
+            // Закладки из ComicInfo переносим в базу, чтобы поиск главы
+            // не открывал каждый файл заново. Ручные отметки при этом
+            // не трогаем: правка пользователя важнее разметки файла.
+            for entry in store.chapters_of(manga_id)? {
+                if !store.marks_of(entry.id)?.is_empty() {
+                    continue;
+                }
+                let Some(info) = yomi_viewer::scan::read_comicinfo(&entry.path()) else {
+                    continue;
+                };
+                for mark in &info.bookmarks {
+                    store.add_mark(entry.id, mark.page, Some(&mark.title))?;
+                }
+            }
             println!("{title} — файлов: {chapters}");
             total_manga += 1;
             total_chapters += chapters;
@@ -211,15 +228,81 @@ fn show(title: &str) -> Result<()> {
             ""
         };
 
+        // Диапазон глав полезнее числа страниц: по нему видно, где
+        // искать нужную главу, а количество страниц ни о чём не говорит.
         println!(
-            "{mark:>5}  {:<26} {:>4} стр.{here}",
+            "{mark:>5}  {:<24} {:<20}{here}",
             chapter.label(),
-            chapter.page_count.unwrap_or(0)
+            chapters_range(&store, chapter)?
         );
     }
 
-    println!("\nПродолжить: yomi read \"{}\"", manga.title);
+    println!("\nПродолжить:    yomi read \"{}\"", manga.title);
+    println!(
+        "Открыть том:   yomi read \"{}\" --volume НОМЕР",
+        manga.title
+    );
+    println!(
+        "Найти главу:   yomi read \"{}\" --chapter НОМЕР",
+        manga.title
+    );
     Ok(())
+}
+
+/// Какие главы лежат в файле — из отметок или из номера самой записи.
+fn chapters_range(store: &Store, chapter: &yomi_db::model::LibraryChapter) -> Result<String> {
+    // Два источника, как и в читалке: ручные отметки из базы важнее,
+    // но у собранного тома разметка живёт закладками внутри файла.
+    let mut numbers: Vec<f32> = store
+        .marks_of(chapter.id)?
+        .iter()
+        .filter_map(|m| m.title.as_deref().and_then(chapter_number_from_label))
+        .collect();
+
+    if numbers.is_empty() {
+        numbers = yomi_viewer::scan::read_comicinfo(&chapter.path())
+            .map(|info| {
+                info.bookmarks
+                    .iter()
+                    .filter_map(|b| chapter_number_from_label(&b.title))
+                    .collect()
+            })
+            .unwrap_or_default();
+    }
+
+    if numbers.len() >= 2 {
+        let first = numbers.iter().cloned().fold(f32::INFINITY, f32::min);
+        let last = numbers.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        return Ok(format!("главы {}–{}", trim(first), trim(last)));
+    }
+
+    if let Some(number) = chapter.number {
+        return Ok(format!("глава {}", trim(number)));
+    }
+
+    // Разметки нет — сказать про главы нечего, показываем объём.
+    Ok(match chapter.page_count {
+        Some(pages) => format!("{pages} стр., глав не размечено"),
+        None => "глав не размечено".to_string(),
+    })
+}
+
+/// Целые номера без дробной части: «359», а не «359.0».
+fn trim(number: f32) -> String {
+    if number.fract().abs() < f32::EPSILON {
+        format!("{}", number as i64)
+    } else {
+        format!("{number}")
+    }
+}
+
+fn chapter_number_from_label(label: &str) -> Option<f32> {
+    let digits: String = label
+        .chars()
+        .skip_while(|c| !c.is_ascii_digit())
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    digits.trim_end_matches('.').parse().ok()
 }
 
 /// `yomi library clean` — убрать записи о пропавших файлах.
@@ -257,5 +340,81 @@ fn clean(confirmed: bool) -> Result<()> {
     let removed = store.delete_chapters(&ids)?;
     let titles = store.delete_empty_manga()?;
     println!("\nУдалено глав: {removed}, опустевших тайтлов: {titles}");
+    Ok(())
+}
+
+/// `yomi library forget` — убрать тайтл или отдельный файл.
+///
+/// Удаляется только запись, файл на диске остаётся. Вместе с записью
+/// уходят прогресс и ручные отметки — восстановить их неоткуда,
+/// поэтому команда всегда говорит, что именно потеряется.
+fn forget(target: &str) -> Result<()> {
+    let mut store = open_store()?;
+
+    // Сначала пробуем как путь: он однозначен, а названия повторяются.
+    let path = std::path::Path::new(target);
+    if path.exists() || target.contains('/') {
+        let canonical = canonical(path);
+        if store.delete_chapter_by_path(&canonical)? || store.delete_chapter_by_path(target)? {
+            let empty = store.delete_empty_manga()?;
+            println!("Запись убрана из библиотеки (файл на диске остался).");
+            if empty > 0 {
+                println!("Заодно убрано опустевших тайтлов: {empty}");
+            }
+            return Ok(());
+        }
+        bail!("в библиотеке нет записи о файле {}", path.display());
+    }
+
+    let found = store.list_manga(Some(target))?;
+    let manga = match found.len() {
+        0 => bail!("в библиотеке нет тайтла «{target}»"),
+        1 => found[0].clone(),
+        _ => {
+            println!("Под «{target}» подходит несколько тайтлов:");
+            for m in &found {
+                let chapters = store.chapters_of(m.id)?.len();
+                println!("  {} — файлов {}", m.title, chapters);
+            }
+            bail!("уточните название или укажите путь к файлу");
+        }
+    };
+
+    let chapters = store.chapters_of(manga.id)?;
+    store.delete_manga(manga.id)?;
+    println!(
+        "«{}» убран из библиотеки: записей {} (файлы на диске остались).",
+        manga.title,
+        chapters.len()
+    );
+    Ok(())
+}
+
+/// `yomi library reset` — очистить библиотеку целиком.
+fn reset(confirmed: bool) -> Result<()> {
+    let mut store = open_store()?;
+
+    let manga = store.manga_count()?;
+    let chapters = store.chapter_count()?;
+
+    if manga == 0 {
+        println!("Библиотека и так пуста.");
+        return Ok(());
+    }
+
+    if !confirmed {
+        println!(
+            "Будет удалено: тайтлов {manga}, записей о файлах {chapters}.\n\
+             Вместе с ними пропадут прогресс чтения и расставленные вручную\n\
+             отметки глав — восстановить их будет неоткуда. Файлы на диске\n\
+             не пострадают, библиотеку можно собрать заново командой scan.\n\n\
+             Очистить: yomi library reset --yes"
+        );
+        return Ok(());
+    }
+
+    let (manga, chapters) = store.clear_all()?;
+    println!("Библиотека очищена: тайтлов {manga}, записей {chapters}.");
+    println!("Собрать заново: yomi library scan КАТАЛОГ");
     Ok(())
 }

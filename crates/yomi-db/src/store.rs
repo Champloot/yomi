@@ -443,6 +443,78 @@ impl Store {
         Ok(Some((volumes[0], *volumes.last().unwrap())))
     }
 
+    /// Удаляет тайтл вместе с главами, прогрессом и отметками.
+    pub fn delete_manga(&mut self, manga_id: i64) -> Result<usize> {
+        Ok(self
+            .conn
+            .execute("DELETE FROM manga WHERE id = ?1", params![manga_id])?)
+    }
+
+    /// Удаляет запись о файле по пути.
+    pub fn delete_chapter_by_path(&mut self, path: &str) -> Result<bool> {
+        let removed = self
+            .conn
+            .execute("DELETE FROM chapters WHERE external_id = ?1", params![path])?;
+        Ok(removed > 0)
+    }
+
+    /// Полная очистка библиотеки.
+    ///
+    /// Прогресс и ручные отметки уходят вместе с записями: восстановить
+    /// их неоткуда, поэтому вызывающий код обязан спросить подтверждение.
+    pub fn clear_all(&mut self) -> Result<(usize, usize)> {
+        let tx = self.conn.transaction()?;
+        let chapters = tx.execute("DELETE FROM chapters", [])?;
+        let manga = tx.execute("DELETE FROM manga", [])?;
+        tx.commit()?;
+        Ok((manga, chapters))
+    }
+
+    /// Записи, чей путь начинается с указанного каталога.
+    pub fn chapters_under(&self, prefix: &str) -> Result<Vec<LibraryChapter>> {
+        Ok(self
+            .all_chapters()?
+            .into_iter()
+            .filter(|c| c.external_id.starts_with(prefix))
+            .collect())
+    }
+
+    /// Ищет том тайтла по номеру.
+    pub fn chapter_by_volume(&self, manga_id: i64, volume: u16) -> Result<Option<LibraryChapter>> {
+        Ok(self
+            .chapters_of(manga_id)?
+            .into_iter()
+            .find(|c| c.volume == Some(volume)))
+    }
+
+    /// Ищет, в каком файле лежит глава с указанным номером.
+    ///
+    /// Отвечает на вопрос «мне сказали про 234-ю главу, где она?» —
+    /// иначе пришлось бы открывать тома наугад. Сначала смотрим на
+    /// номер самой записи, потом на закладки внутри собранного тома.
+    pub fn locate_chapter(
+        &self,
+        manga_id: i64,
+        number: f32,
+    ) -> Result<Option<(LibraryChapter, Option<u32>)>> {
+        for chapter in self.chapters_of(manga_id)? {
+            if chapter.number == Some(number) {
+                return Ok(Some((chapter, None)));
+            }
+        }
+
+        // Внутри тома главы размечены отметками; их подписи хранят номер.
+        for chapter in self.chapters_of(manga_id)? {
+            for mark in self.marks_of(chapter.id)? {
+                let Some(title) = &mark.title else { continue };
+                if label_number(title) == Some(number) {
+                    return Ok(Some((chapter, Some(mark.page))));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     pub fn manga_count(&self) -> Result<i64> {
         Ok(self
             .conn
@@ -454,6 +526,16 @@ impl Store {
             .conn
             .query_row("SELECT count(*) FROM chapters", [], |r| r.get(0))?)
     }
+}
+
+/// Достаёт номер главы из подписи закладки вида «Глава 234 — Название».
+fn label_number(label: &str) -> Option<f32> {
+    let digits: String = label
+        .chars()
+        .skip_while(|c| !c.is_ascii_digit())
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    digits.trim_end_matches('.').parse().ok()
 }
 
 fn row_to_manga(r: &Row<'_>) -> rusqlite::Result<Result<LibraryManga>> {
@@ -885,6 +967,124 @@ mod tests {
             title: Some("Особая".into()),
         };
         assert_eq!(named.label(0), "Особая");
+    }
+
+    #[test]
+    fn deleting_a_manga_takes_its_chapters_and_progress() {
+        let mut s = Store::open_in_memory().unwrap();
+        let (manga_id, _) = s
+            .upsert_scanned(&scanned(vec![chapter("/м/Т/1.cbz", 1.0)]))
+            .unwrap();
+        let file = s.chapters_of(manga_id).unwrap()[0].id;
+        s.save_progress(file, 3, Some(20)).unwrap();
+        s.add_mark(file, 5, None).unwrap();
+
+        assert_eq!(s.delete_manga(manga_id).unwrap(), 1);
+        assert_eq!(s.manga_count().unwrap(), 0);
+        assert_eq!(s.chapter_count().unwrap(), 0);
+        assert!(s.progress_of(file).unwrap().is_none());
+        assert!(s.marks_of(file).unwrap().is_empty());
+    }
+
+    #[test]
+    fn deleting_a_single_file_leaves_the_rest() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.upsert_scanned(&scanned(vec![
+            chapter("/м/Т/1.cbz", 1.0),
+            chapter("/м/Т/2.cbz", 2.0),
+        ]))
+        .unwrap();
+
+        assert!(s.delete_chapter_by_path("/м/Т/1.cbz").unwrap());
+        assert_eq!(s.chapter_count().unwrap(), 1);
+        assert!(!s.delete_chapter_by_path("/м/Т/нет.cbz").unwrap());
+    }
+
+    #[test]
+    fn clearing_removes_everything() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.upsert_scanned(&scanned(vec![chapter("/м/Т/1.cbz", 1.0)]))
+            .unwrap();
+        let (manga, chapters) = s.clear_all().unwrap();
+        assert_eq!((manga, chapters), (1, 1));
+        assert_eq!(s.manga_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn chapters_under_filters_by_directory() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.upsert_scanned(&scanned(vec![chapter("/м/Т/1.cbz", 1.0)]))
+            .unwrap();
+        let mut other = scanned(vec![chapter("/другое/1.cbz", 1.0)]);
+        other.external_id = "/другое".into();
+        other.title = "Другое".into();
+        s.upsert_scanned(&other).unwrap();
+
+        assert_eq!(s.chapters_under("/м/").unwrap().len(), 1);
+        assert_eq!(s.chapters_under("/").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn locates_a_chapter_by_its_own_number() {
+        let mut s = Store::open_in_memory().unwrap();
+        let (manga_id, _) = s
+            .upsert_scanned(&scanned(vec![
+                chapter("/м/Т/1.cbz", 359.0),
+                chapter("/м/Т/2.cbz", 360.0),
+            ]))
+            .unwrap();
+
+        let (found, page) = s.locate_chapter(manga_id, 360.0).unwrap().unwrap();
+        assert!(found.external_id.ends_with("2.cbz"));
+        assert_eq!(page, None, "отдельный файл открывается с начала");
+    }
+
+    #[test]
+    fn locates_a_chapter_inside_an_assembled_volume() {
+        // Собранный том — одна запись, главы внутри размечены отметками.
+        let mut s = Store::open_in_memory().unwrap();
+        let mut volume = chapter("/м/Т/том33.cbz", 1.0);
+        volume.number = None;
+        volume.volume = Some(33);
+        let (manga_id, _) = s.upsert_scanned(&scanned(vec![volume])).unwrap();
+        let file = s.chapters_of(manga_id).unwrap()[0].id;
+
+        s.add_mark(file, 0, Some("Глава 359 — Первая")).unwrap();
+        s.add_mark(file, 22, Some("Глава 360 — Вторая")).unwrap();
+
+        let (found, page) = s.locate_chapter(manga_id, 360.0).unwrap().unwrap();
+        assert_eq!(found.id, file);
+        assert_eq!(page, Some(22), "открыть надо сразу нужную страницу");
+    }
+
+    #[test]
+    fn missing_chapter_is_not_found() {
+        let mut s = Store::open_in_memory().unwrap();
+        let (manga_id, _) = s
+            .upsert_scanned(&scanned(vec![chapter("/м/Т/1.cbz", 1.0)]))
+            .unwrap();
+        assert!(s.locate_chapter(manga_id, 999.0).unwrap().is_none());
+    }
+
+    #[test]
+    fn finds_a_volume_by_number() {
+        let mut s = Store::open_in_memory().unwrap();
+        let mut a = chapter("/м/Т/33.cbz", 1.0);
+        a.volume = Some(33);
+        let mut b = chapter("/м/Т/34.cbz", 2.0);
+        b.volume = Some(34);
+        let (manga_id, _) = s.upsert_scanned(&scanned(vec![a, b])).unwrap();
+
+        let found = s.chapter_by_volume(manga_id, 34).unwrap().unwrap();
+        assert!(found.external_id.ends_with("34.cbz"));
+        assert!(s.chapter_by_volume(manga_id, 99).unwrap().is_none());
+    }
+
+    #[test]
+    fn label_number_reads_the_chapter_number() {
+        assert_eq!(label_number("Глава 234 — Название"), Some(234.0));
+        assert_eq!(label_number("Глава 10.5"), Some(10.5));
+        assert_eq!(label_number("Послесловие"), None);
     }
 
     #[test]

@@ -230,6 +230,20 @@ fn manga_from_dir(dir: &Path) -> Option<ScannedManga> {
 /// Вложенность — один уровень: `корень/Тайтл/главы`. Рекурсия вглубь
 /// намеренно не делается, иначе на больших коллекциях сканирование
 /// расползается по всей файловой системе.
+/// Пометка, которую `yomi build` оставляет в `ComicInfo.xml`.
+pub const ASSEMBLED_MARK: &str = "собрано yomi";
+
+/// Собран ли файл командой `build`.
+///
+/// Нужно, чтобы отличить готовый том от исходных глав, из которых он
+/// сложен: если те остались в каталоге, содержимое попадёт в библиотеку
+/// дважды, и список станет нечитаемым.
+fn is_assembled(info: Option<&ComicInfo>) -> bool {
+    info.and_then(|i| i.notes.as_deref())
+        .map(|notes| notes.contains(ASSEMBLED_MARK))
+        .unwrap_or(false)
+}
+
 pub fn scan_library(root: &Path) -> Vec<ScannedManga> {
     let mut found = Vec::new();
 
@@ -254,22 +268,106 @@ pub fn scan_library(root: &Path) -> Vec<ScannedManga> {
         }
     }
 
-    // CBZ, лежащие прямо в корне: каждый становится отдельным тайтлом.
+    // CBZ, лежащие прямо в корне. Каждый файл сам по себе тайтлом не
+    // является: `Название_Vol_33.cbz` и `Название_Vol_34.cbz` — это два
+    // тома одной серии, а двенадцать файлов глав — вовсе один том.
+    // Группируем по названию, взятому из ComicInfo или из имени файла.
+    // Если в каталоге есть хоть один собранный том, остальные файлы —
+    // это исходные главы, из которых он сложен. Проверять внутри групп
+    // нельзя: у глав с разными названиями отпечатки имён различаются,
+    // и они попадут в разные группы, где сравнивать будет не с чем.
+    let assembled: Vec<PathBuf> = loose_cbz
+        .iter()
+        .filter(|p| is_assembled(read_comicinfo(p).as_ref()))
+        .cloned()
+        .collect();
+
+    if !assembled.is_empty() && assembled.len() < loose_cbz.len() {
+        tracing::info!(
+            skipped = loose_cbz.len() - assembled.len(),
+            "пропущены исходные главы: в каталоге есть собранный том"
+        );
+        loose_cbz = assembled;
+    }
+
+    let mut by_series: std::collections::BTreeMap<String, Vec<PathBuf>> =
+        std::collections::BTreeMap::new();
+
     for cbz in loose_cbz {
-        let name = cbz
-            .file_stem()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
         let info = read_comicinfo(&cbz);
-        let chapter = chapter_from_path(&cbz);
+        let key = info
+            .as_ref()
+            .and_then(|i| i.series.clone())
+            .unwrap_or_else(|| {
+                // Без метаданных группируем по «отпечатку» имени: текст
+                // без цифр и разделителей. У «33_-_359_Глава» и
+                // «33_-_360_Глава» он совпадает, у разных серий — нет.
+                //
+                // Имена вида «33_-_359_Глава» дают пустой отпечаток
+                // (цифры и разделители, дальше одно и то же слово) —
+                // это тоже признак: такие файлы почти наверняка главы
+                // одной серии, лежащие в общей папке.
+                let stem = cbz
+                    .file_stem()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let fingerprint: String = stem
+                    .chars()
+                    .filter(|c| !c.is_ascii_digit() && c.is_alphanumeric())
+                    .collect::<String>()
+                    .to_lowercase();
+                if fingerprint.is_empty() {
+                    // Совсем без букв: группируем всё такое вместе,
+                    // название потом возьмётся из каталога.
+                    root.file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| stem.clone())
+                } else {
+                    fingerprint
+                }
+            });
+        by_series.entry(key).or_default().push(cbz);
+    }
+
+    for (title, mut files) in by_series {
+        natural_sort::sort(&mut files, |p| {
+            p.file_name().and_then(|n| n.to_str()).unwrap_or("")
+        });
+
+        let info = files.iter().find_map(|p| read_comicinfo(p));
+        let chapters: Vec<ScannedChapter> = files.iter().map(|p| chapter_from_path(p)).collect();
+
         found.push(ScannedManga {
-            path: cbz.clone(),
-            title: info.as_ref().and_then(|i| i.series.clone()).unwrap_or(name),
+            // Для группы из нескольких файлов путь тайтла — каталог:
+            // отдельного файла, который бы её представлял, нет.
+            path: if files.len() == 1 {
+                files[0].clone()
+            } else {
+                root.to_path_buf()
+            },
+            title: info
+                .as_ref()
+                .and_then(|i| i.series.clone())
+                // Отпечаток — служебный ключ группировки, показывать
+                // его нельзя. Для одиночного файла берём его имя, для
+                // группы — имя каталога: лучшее, что есть без метаданных.
+                .unwrap_or_else(|| {
+                    if files.len() == 1 {
+                        files[0]
+                            .file_stem()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| title.clone())
+                    } else {
+                        root.file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| title.clone())
+                    }
+                }),
             authors: info.as_ref().map(|i| i.writers.clone()).unwrap_or_default(),
             genres: info.as_ref().map(|i| i.genres.clone()).unwrap_or_default(),
             year: info.as_ref().and_then(|i| i.year),
             description: info.and_then(|i| i.summary),
-            chapters: vec![chapter],
+            chapters,
         });
     }
 

@@ -1032,3 +1032,148 @@ fn an_existing_file_wins_over_a_title_with_the_same_name() {
     let combined = format!("{}{}", stdout(&out), String::from_utf8_lossy(&out.stderr));
     assert!(!combined.contains("не файл и не название"), "{combined}");
 }
+
+/// Библиотека с собранным томом, где размечены главы.
+fn library_with_assembled_volume(dir: &Path) -> PathBuf {
+    let src = dir.join("главы");
+    std::fs::create_dir_all(&src).unwrap();
+    make_cbz(&src.join("33_-_359_Первая.cbz"), 4);
+    make_cbz(&src.join("33_-_360_Вторая.cbz"), 3);
+    run(
+        dir,
+        &["build", src.to_str().unwrap(), "--series", "Тайтл", "--yes"],
+    );
+
+    let lib = dir.join("библиотека");
+    std::fs::create_dir_all(&lib).unwrap();
+    let built = src.join("Тайтл").join("Тайтл_Vol_33.cbz");
+    std::fs::copy(built, lib.join("Тайтл_Vol_33.cbz")).unwrap();
+    run(dir, &["library", "scan", lib.to_str().unwrap()]);
+    lib
+}
+
+#[test]
+fn library_reset_requires_confirmation() {
+    let dir = temp_dir("libreset");
+    library_with_assembled_volume(&dir);
+
+    let dry = run(&dir, &["library", "reset"]);
+    assert_eq!(code(&dry), 0);
+    assert!(stdout(&dry).contains("--yes"), "{}", stdout(&dry));
+    // Без подтверждения ничего не удаляется.
+    assert!(stdout(&run(&dir, &["library"])).contains("Тайтл"));
+
+    assert_eq!(code(&run(&dir, &["library", "reset", "--yes"])), 0);
+    assert!(stdout(&run(&dir, &["library"])).contains("пуста"));
+}
+
+#[test]
+fn library_forget_removes_one_title() {
+    let dir = temp_dir("libforget");
+    library_with_assembled_volume(&dir);
+
+    let out = run(&dir, &["library", "forget", "Тайтл"]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        stdout(&out).contains("на диске остались"),
+        "{}",
+        stdout(&out)
+    );
+    assert!(stdout(&run(&dir, &["library"])).contains("пуста"));
+}
+
+#[test]
+fn library_forget_by_path_removes_one_file() {
+    let dir = temp_dir("libforgetpath");
+    let lib = library_with_assembled_volume(&dir);
+    let file = lib.join("Тайтл_Vol_33.cbz");
+
+    assert_eq!(
+        code(&run(&dir, &["library", "forget", file.to_str().unwrap()])),
+        0
+    );
+    assert!(stdout(&run(&dir, &["library"])).contains("пуста"));
+    assert!(file.exists(), "файл на диске трогать нельзя");
+}
+
+#[test]
+fn library_forget_unknown_target_is_an_error() {
+    let dir = temp_dir("libforgetbad");
+    library_with_assembled_volume(&dir);
+    assert_ne!(code(&run(&dir, &["library", "forget", "Нет такого"])), 0);
+}
+
+#[test]
+fn library_shows_chapter_range_not_page_count() {
+    let dir = temp_dir("librange");
+    library_with_assembled_volume(&dir);
+
+    let text = stdout(&run(&dir, &["library", "Тайтл"]));
+    assert!(
+        text.contains("главы 359–360"),
+        "нужен диапазон глав: {text}"
+    );
+}
+
+#[test]
+fn reading_a_specific_chapter_finds_its_volume() {
+    let dir = temp_dir("readchapter");
+    library_with_assembled_volume(&dir);
+
+    let out = run(&dir, &["read", "Тайтл", "--chapter", "360"]);
+    let text = stdout(&out);
+    assert!(text.contains("глава 360"), "{text}");
+    // Вторая глава начинается после первой, значит не с первой страницы.
+    assert!(
+        text.contains("страница 5"),
+        "должен открыться на нужной странице: {text}"
+    );
+}
+
+#[test]
+fn reading_a_missing_chapter_explains_itself() {
+    let dir = temp_dir("readnochapter");
+    library_with_assembled_volume(&dir);
+
+    let out = run(&dir, &["read", "Тайтл", "--chapter", "999"]);
+    assert_ne!(code(&out), 0);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("нет в библиотеке"));
+}
+
+#[test]
+fn reading_a_specific_volume_ignores_saved_progress() {
+    let dir = temp_dir("readvolume");
+    library_with_assembled_volume(&dir);
+
+    let out = run(&dir, &["read", "Тайтл", "--volume", "33"]);
+    assert!(stdout(&out).contains("т.33"), "{}", stdout(&out));
+
+    let missing = run(&dir, &["read", "Тайтл", "--volume", "99"]);
+    assert_ne!(code(&missing), 0);
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("тома 99 нет"));
+}
+
+#[test]
+fn assembled_volume_hides_its_source_chapters() {
+    // Иначе одно и то же содержимое попадает в библиотеку дважды.
+    let dir = temp_dir("libdedup");
+    let mixed = dir.join("вперемешку");
+    std::fs::create_dir_all(&mixed).unwrap();
+    make_cbz(&mixed.join("33_-_359_Первая.cbz"), 3);
+    make_cbz(&mixed.join("33_-_360_Вторая.cbz"), 3);
+    run(
+        &dir,
+        &["build", mixed.to_str().unwrap(), "--series", "Т", "--yes"],
+    );
+
+    // Кладём собранный том рядом с исходными главами.
+    let built = mixed.join("Т").join("Т_Vol_33.cbz");
+    std::fs::copy(built, mixed.join("Т_Vol_33.cbz")).unwrap();
+
+    run(&dir, &["library", "scan", mixed.to_str().unwrap()]);
+    let text = stdout(&run(&dir, &["library"]));
+    assert!(
+        !text.contains("359"),
+        "исходные главы не должны попадать в библиотеку рядом с томом:\n{text}"
+    );
+}
