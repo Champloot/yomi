@@ -27,6 +27,12 @@ pub async fn run(cmd: &MarksCommand) -> Result<()> {
 /// Отметки привязаны к записи библиотеки: хранить их для произвольного
 /// пути было бы негде, а молча ничего не делать — хуже, чем объяснить.
 fn locate(path: &Path) -> Result<(Store, i64)> {
+    // Сначала о самом файле: сказать «нет в библиотеке» про
+    // несуществующий путь — значит увести не туда.
+    if !path.exists() {
+        bail!("файл не существует: {}", path.display());
+    }
+
     let db_path = yomi_core::paths::database_file()?;
     if !db_path.exists() {
         bail!("библиотека пуста: сначала `yomi library scan КАТАЛОГ`");

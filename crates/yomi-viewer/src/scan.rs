@@ -330,6 +330,19 @@ pub fn scan_library(root: &Path) -> Vec<ScannedManga> {
     }
 
     for (title, mut files) in by_series {
+        // Архивы без единой страницы в библиотеку не берём: битый или
+        // посторонний ZIP там только мешает, а прочитать его всё равно
+        // нельзя. Это же отсеивает случайно попавшие в каталог архивы.
+        files.retain(|p| {
+            PageSource::open(p)
+                .map(|s| s.page_count() > 0)
+                .unwrap_or(false)
+        });
+        if files.is_empty() {
+            tracing::debug!(title = %title, "пропущен: нет читаемых страниц");
+            continue;
+        }
+
         natural_sort::sort(&mut files, |p| {
             p.file_name().and_then(|n| n.to_str()).unwrap_or("")
         });
@@ -474,6 +487,30 @@ mod tests {
         let found = scan_library(root.path());
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].title, "Одиночный том");
+    }
+
+    #[test]
+    fn unreadable_archives_are_not_added_to_the_library() {
+        let root = tempfile::tempdir().unwrap();
+        // Битый ZIP и архив без картинок — оба бесполезны для чтения.
+        std::fs::write(root.path().join("битый.cbz"), b"PK\x03\x04broken").unwrap();
+        {
+            let file = std::fs::File::create(root.path().join("пустой.cbz")).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            zip.start_file("readme.txt", zip::write::FileOptions::default())
+                .unwrap();
+            zip.write_all(b"no images").unwrap();
+            zip.finish().unwrap();
+        }
+        make_cbz(&root.path().join("хороший.cbz"), 3, None);
+
+        let found = scan_library(root.path());
+        assert_eq!(
+            found.len(),
+            1,
+            "в библиотеку должен попасть только читаемый файл"
+        );
+        assert_eq!(found[0].chapters.len(), 1);
     }
 
     #[test]
