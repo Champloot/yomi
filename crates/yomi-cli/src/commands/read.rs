@@ -61,15 +61,6 @@ pub async fn run(ctx: &Ctx, args: &ReadArgs) -> Result<()> {
         resolve_by_title(&args.target, args.volume, args.chapter)?
     };
 
-    // CBR/RAR узнаём раньше PageSource::open: у отказа есть конкретная
-    // причина (несвободная лицензия unrar, см. ADR-0006), и пользователь
-    // должен увидеть её, а не обезличенное «формат не поддерживается».
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        if matches!(ext.to_lowercase().as_str(), "cbr" | "rar") {
-            bail!("CBR/RAR пока не поддерживается, см. docs/adr/0006-formats.md");
-        }
-    }
-
     // Проверка номера страницы — это валидация аргумента, она не зависит
     // от содержимого файла и должна отработать раньше, чем мы вообще
     // попытаемся открыть источник.

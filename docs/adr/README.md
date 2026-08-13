@@ -20,3 +20,4 @@ ADR (Architecture Decision Record) — короткая запись о знач
 | [0005](0005-source-plugins.md) | Источники за трейтом, MangaDex первым | принято |
 | [0006](0006-formats.md) | CBZ и каталоги; CBR и PDF отложены | принято |
 | [0007](0007-cli-before-tui.md) | CLI раньше TUI | принято |
+| [0008](0008-pdf-and-cbr.md) | PDF через встроенные изображения, CBR через `unar` | принято |

@@ -34,6 +34,19 @@ pub enum PageSource {
     SingleFile {
         path: PathBuf,
     },
+    /// PDF с извлекаемыми страницами — см. [`crate::pdf`].
+    Pdf(crate::pdf::PdfPages),
+    /// CBR/RAR, распакованный во временный каталог утилитой `unar`.
+    ///
+    /// Сам RAR не разбираем: лицензия `unrar` несвободна (см.
+    /// ADR-0006), писать собственный распаковщик — не наша задача.
+    /// `TempDir` живёт всё время, пока используется источник, и
+    /// удаляется вместе с ним.
+    Cbr {
+        path: PathBuf,
+        _extracted: tempfile::TempDir,
+        inner: Box<PageSource>,
+    },
 }
 
 impl PageSource {
@@ -99,7 +112,50 @@ impl PageSource {
         })
     }
 
-    /// Открывает каталог, CBZ или одиночное изображение по пути.
+    /// Открывает PDF, извлекая по одной странице-картинке на страницу.
+    /// Подробности и ограничения — в [`crate::pdf`].
+    pub fn open_pdf(path: &Path) -> Result<Self> {
+        Ok(Self::Pdf(crate::pdf::PdfPages::open(path)?))
+    }
+
+    /// Открывает CBR/RAR через внешнюю утилиту `unar`.
+    ///
+    /// Требует `unar` в `PATH`; при отсутствии — понятная ошибка с
+    /// подсказкой, что установить и почему это не встроено (лицензия
+    /// `unrar` несвободна).
+    pub fn open_cbr(path: &Path) -> Result<Self> {
+        let unar = which::which("unar").map_err(|_| Error::MissingUnar)?;
+
+        let extracted = tempfile::tempdir()?;
+        let status = std::process::Command::new(unar)
+            .arg("-output-directory")
+            .arg(extracted.path())
+            .arg("-force-overwrite")
+            .arg("-no-directory")
+            .arg("-quiet")
+            .arg(path)
+            .status()
+            .map_err(|e| Error::Archive {
+                path: path.to_path_buf(),
+                message: format!("запуск unar: {e}"),
+            })?;
+
+        if !status.success() {
+            return Err(Error::Archive {
+                path: path.to_path_buf(),
+                message: format!("unar завершился с кодом {:?}", status.code()),
+            });
+        }
+
+        let inner = Self::open_directory(extracted.path())?;
+        Ok(Self::Cbr {
+            path: path.to_path_buf(),
+            _extracted: extracted,
+            inner: Box::new(inner),
+        })
+    }
+
+    /// Открывает каталог, CBZ, CBR, PDF или одиночное изображение по пути.
     pub fn open(path: &Path) -> Result<Self> {
         if path.is_dir() {
             return Self::open_directory(path);
@@ -111,6 +167,8 @@ impl PageSource {
             .unwrap_or_default();
         match ext.as_str() {
             "cbz" | "zip" => Self::open_cbz(path),
+            "cbr" | "rar" => Self::open_cbr(path),
+            "pdf" => Self::open_pdf(path),
             _ if is_image(&path.to_string_lossy()) => Self::open_single_image(path),
             _ => Err(Error::UnsupportedFormat(path.to_path_buf())),
         }
@@ -133,6 +191,12 @@ impl PageSource {
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default()],
+            // Внутри PDF нет отдельных имён файлов — только номера
+            // страниц, которые уже отражены их порядком.
+            Self::Pdf(pages) => (0..pages.page_count())
+                .map(|i| format!("page{:04}", i + 1))
+                .collect(),
+            Self::Cbr { inner, .. } => inner.entry_names(),
         }
     }
 
@@ -143,6 +207,15 @@ impl PageSource {
     /// размер которых определить не удалось, пропускаются — битый файл
     /// не повод отказываться от разбора остальных.
     pub fn page_shapes(&self) -> Vec<crate::structure::PageShape> {
+        // У PDF размеры уже известны из словаря Width/Height — читать и
+        // декодировать сами картинки только ради формы не нужно.
+        if let Self::Pdf(pages) = self {
+            return pages
+                .page_shapes()
+                .into_iter()
+                .map(|(width, height)| crate::structure::PageShape { width, height })
+                .collect();
+        }
         (0..self.page_count())
             .filter_map(|i| {
                 let bytes = self.read_page(i).ok()?;
@@ -162,6 +235,8 @@ impl PageSource {
             Self::Directory { root, .. } => root,
             Self::Cbz { path, .. } => path,
             Self::SingleFile { path } => path,
+            Self::Pdf(pages) => pages.path(),
+            Self::Cbr { path, .. } => path,
         }
     }
 
@@ -170,6 +245,8 @@ impl PageSource {
             Self::Directory { files, .. } => files.len(),
             Self::Cbz { entries, .. } => entries.len(),
             Self::SingleFile { .. } => 1,
+            Self::Pdf(pages) => pages.page_count(),
+            Self::Cbr { inner, .. } => inner.page_count(),
         }
     }
 
@@ -186,6 +263,8 @@ impl PageSource {
                 }
                 Ok(std::fs::read(path)?)
             }
+            Self::Pdf(pages) => pages.read_page(index),
+            Self::Cbr { inner, .. } => inner.read_page(index),
             Self::Cbz { path, entries } => {
                 let name = entries.get(index).ok_or(Error::PageOutOfRange(index))?;
                 let file = std::fs::File::open(path)?;
@@ -287,6 +366,18 @@ mod tests {
     }
 
     #[test]
+    fn pdf_extension_is_routed_to_the_pdf_reader_not_unsupported() {
+        // Не важно, что файл битый — важно, что диспетчер отправил его
+        // именно в разбор PDF, а не свалил в общий отказ «формат не
+        // поддержан», как это было бы для незнакомого расширения.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("том.pdf");
+        std::fs::write(&path, b"not really a pdf").unwrap();
+
+        assert!(matches!(PageSource::open(&path), Err(Error::Pdf { .. })));
+    }
+
+    #[test]
     fn open_dispatches_single_image_to_one_page_source() {
         let dir = tempfile::tempdir().unwrap();
         let png = dir.path().join("cover.png");
@@ -294,5 +385,64 @@ mod tests {
         let src = PageSource::open(&png).unwrap();
         assert_eq!(src.page_count(), 1);
         assert!(src.read_page(1).is_err());
+    }
+
+    /// `unar` понимает несколько форматов архивов по содержимому, а не
+    /// только по расширению — этим удобно пользоваться в тестах: не
+    /// нужен настоящий RAR (несвободный формат), обычный ZIP с
+    /// расширением `.cbr` для `unar` неотличим от настоящего CBR.
+    fn make_fake_cbr(dir: &Path) -> PathBuf {
+        let path = dir.join("глава.cbr");
+        let file = std::fs::File::create(&path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let opts = zip::write::FileOptions::default();
+        for (name, content) in [("002.png", b"b" as &[u8]), ("001.png", b"a")] {
+            zip.start_file(name, opts).unwrap();
+            zip.write_all(content).unwrap();
+        }
+        zip.finish().unwrap();
+        path
+    }
+
+    #[test]
+    fn cbr_is_extracted_and_read_in_natural_order() {
+        if which::which("unar").is_err() {
+            eprintln!("unar не найден — пропускаю тест окружения");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let cbr = make_fake_cbr(dir.path());
+
+        let src = PageSource::open(&cbr).unwrap();
+        assert_eq!(src.page_count(), 2);
+        assert_eq!(src.read_page(0).unwrap(), b"a");
+        assert_eq!(src.read_page(1).unwrap(), b"b");
+        // Сообщения об ошибках должны указывать на исходный .cbr,
+        // а не на временный каталог распаковки.
+        assert_eq!(src.path(), cbr);
+    }
+
+    #[test]
+    fn rar_extension_is_also_routed_through_unar() {
+        if which::which("unar").is_err() {
+            eprintln!("unar не найден — пропускаю тест окружения");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let cbr = make_fake_cbr(dir.path());
+        let rar = dir.path().join("глава.rar");
+        std::fs::rename(cbr, &rar).unwrap();
+
+        assert_eq!(PageSource::open(&rar).unwrap().page_count(), 2);
+    }
+
+    #[test]
+    fn missing_unar_message_explains_what_to_install_and_why() {
+        let message = Error::MissingUnar.to_string();
+        assert!(message.contains("unar"), "{message}");
+        assert!(message.contains("PATH"), "{message}");
+        // Причина отсутствия встроенной поддержки RAR должна быть
+        // объяснена, а не просто констатирована как факт.
+        assert!(message.contains("0006"), "{message}");
     }
 }

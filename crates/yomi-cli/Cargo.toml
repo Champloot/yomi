@@ -35,3 +35,4 @@ clap_mangen = "0.2"
 [dev-dependencies]
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
 image = { version = "0.24", default-features = false, features = ["png"] }
+which = "6"

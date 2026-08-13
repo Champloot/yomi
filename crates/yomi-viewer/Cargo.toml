@@ -15,6 +15,10 @@ thiserror.workspace = true
 tracing.workspace = true
 image = { version = "0.24", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
+lopdf = { version = "0.32", default-features = false, features = ["nom_parser"] }
+tempfile = "3"
+which = "6"
+flate2 = "1"
 crossterm = "0.27"
 base64 = "0.21"
 

@@ -21,6 +21,24 @@ pub enum Error {
     #[error("ошибка архива {path}: {message}")]
     Archive { path: PathBuf, message: String },
 
+    #[error("не удалось разобрать PDF {path}: {message}")]
+    Pdf { path: PathBuf, message: String },
+
+    #[error("страница {page} в {path}: {reason}")]
+    UnsupportedPdfPage {
+        path: PathBuf,
+        page: usize,
+        reason: String,
+    },
+
+    #[error(
+        "для чтения CBR/RAR нужна внешняя утилита unar — не найдена в PATH.\n\
+         Установите её пакетом дистрибутива (например, `unar` в apt/pacman/brew)\n\
+         и повторите. Причина, почему это не встроено: лицензия unrar\n\
+         несвободна, см. docs/adr/0006-formats.md"
+    )]
+    MissingUnar,
+
     #[error("не удалось декодировать изображение: {0}")]
     Decode(#[from] image::ImageError),
 

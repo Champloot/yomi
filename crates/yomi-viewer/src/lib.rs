@@ -14,6 +14,7 @@ pub mod comicinfo;
 mod error;
 pub mod fit;
 mod natural_sort;
+pub mod pdf;
 pub mod reader;
 pub mod render;
 pub mod scan;

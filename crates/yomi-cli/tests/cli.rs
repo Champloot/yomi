@@ -209,17 +209,53 @@ fn reading_missing_path_fails() {
     assert_eq!(code(&out), 1);
 }
 
-#[test]
-fn reading_cbr_gives_specific_unsupported_message() {
-    let dir = temp_dir("readcbr");
+/// `unar` неотличим по содержимому от обычного ZIP-архива — этим удобно
+/// пользоваться в тестах, не имея дела с настоящим (несвободным) RAR.
+fn make_fake_cbr(dir: &Path) -> PathBuf {
     let cbr = dir.join("chapter.cbr");
-    std::fs::write(&cbr, b"not really rar, format check happens by extension").unwrap();
-    let out = run(&dir, &["read", cbr.to_str().unwrap()]);
-    assert_eq!(code(&out), 1);
+    make_cbz(&cbr, 2);
+    cbr
+}
+
+#[test]
+fn reading_cbr_works_when_unar_is_present() {
+    if which::which("unar").is_err() {
+        eprintln!("unar не найден в этом окружении — пропускаю тест");
+        return;
+    }
+    let dir = temp_dir("readcbrok");
+    let cbr = make_fake_cbr(&dir);
+
+    // `info` не требует терминала и достаточно, чтобы подтвердить: CBR
+    // действительно распаковывается и читается, а не просто «не падает».
+    let out = run(&dir, &["info", cbr.to_str().unwrap()]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(stdout(&out).contains("Страниц: 2"), "{}", stdout(&out));
+}
+
+#[test]
+fn reading_cbr_without_unar_explains_how_to_install_it() {
+    let dir = temp_dir("readcbrmissing");
+    let cbr = make_fake_cbr(&dir);
+
+    // PATH без unar — гарантированно, независимо от того, установлен ли
+    // он на машине, где реально гоняются тесты.
+    let out = Command::new(BIN)
+        .args(["info", cbr.to_str().unwrap()])
+        .env("YOMI_CONFIG_DIR", dir.join("config"))
+        .env("YOMI_DATA_DIR", dir.join("data"))
+        .env("YOMI_CACHE_DIR", dir.join("cache"))
+        .env("PATH", "/nonexistent")
+        .env_remove("YOMI_LOG")
+        .output()
+        .expect("запуск бинарника yomi");
+
+    assert_ne!(out.status.code(), Some(0));
     let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("unar"), "{stderr}");
     assert!(
-        stderr.contains("CBR"),
-        "сообщение должно называть формат явно: {stderr}"
+        stderr.contains("0006"),
+        "должна быть ссылка на ADR: {stderr}"
     );
 }
 
